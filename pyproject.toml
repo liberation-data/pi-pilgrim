@@ -1,0 +1,18 @@
+[tool.poetry]
+name = "pi-pilgrim"
+version = "0.1.0"
+description = ""
+authors = ["Jasper Blues <jasper@liberation-data.com>"]
+readme = "README.md"
+packages = [{include = "pipilgrim"}]
+
+[tool.poetry.dependencies]
+loguru = "^0.7.2"
+python-dotenv = "^1.0.1"
+python = "^3.11"
+
+[tool.poetry.group.dev.dependencies]
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
