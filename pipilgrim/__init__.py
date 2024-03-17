@@ -1,1 +1,1 @@
-from pilgrim.pilgrim_assembly import PilgrimAssembly
+from pipilgrim.pilgrim_assembly import PilgrimAssembly
