@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "pi-pilgrim"
-version = "0.1.1"
+version = "0.1.2"
 description = ""
 authors = ["Jasper Blues <jasper@liberation-data.com>"]
 readme = "README.md"

@@ -1,4 +1,4 @@
-from pilgrim.pilgrim_assembly import PilgrimAssembly
+from pipilgrim import PilgrimAssembly
 from tests.utils.test_instance import TestInstance
 
 

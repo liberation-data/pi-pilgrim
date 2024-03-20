@@ -1,4 +1,4 @@
-from pilgrim import PilgrimAssembly
+from pipilgrim import PilgrimAssembly
 from tests.utils.quest import DamselInDistressQuest
 
 
