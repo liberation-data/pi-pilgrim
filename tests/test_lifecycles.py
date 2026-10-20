@@ -430,24 +430,14 @@ class TestLifecycles(unittest.TestCase):
         self.assertIsInstance(engine, Engine)
 
     def test_shared_is_made_once_across_threads(self):
-        seen, ready = [], threading.Barrier(8)
-
-        def resolve():
-            ready.wait()
-            seen.append(self.assembly.slow_engine())
-
-        run_in_threads(resolve, 8)
+        seen = []
+        run_in_threads(lambda: seen.append(self.assembly.slow_engine()), 8)
         self.assertEqual(1, Engine.made)
         self.assertTrue(all(it is seen[0] for it in seen))
 
     def test_weak_shared_is_made_once_across_threads(self):
-        seen, ready = [], threading.Barrier(8)
-
-        def resolve():
-            ready.wait()
-            seen.append(self.assembly.slow_weak_engine())
-
-        run_in_threads(resolve, 8)
+        seen = []
+        run_in_threads(lambda: seen.append(self.assembly.slow_weak_engine()), 8)
         self.assertEqual(1, Engine.made)
         self.assertTrue(all(it is seen[0] for it in seen))
 

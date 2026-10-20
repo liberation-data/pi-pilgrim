@@ -56,6 +56,17 @@ class TestAssembledAnnotations(unittest.TestCase):
         with self.assertRaisesRegex(PilgrimError, "Garrison.ledger is annotated with Undefined"):
             Garrison().ledger
 
+    def test_an_attribute_named_as_its_type_resolves_the_type(self):
+        class Sentry:
+            Knight: "Knight" = Assembled(assembly=ArmyAssembly)
+
+        self.assertIsInstance(Sentry().Knight, Knight)
+
+    def test_resolves_a_class_from_a_module_that_isnt_imported(self):
+        names = {"__name__": "not_a_module", "Assembled": Assembled, "ArmyAssembly": ArmyAssembly, "Knight": Knight}
+        exec("class Tent:\n    knight: Knight = Assembled(assembly=ArmyAssembly)\n", names)
+        self.assertIsInstance(names["Tent"]().knight, Knight)
+
     def test_resolves_a_class_defined_in_a_function(self):
         class Herald:
             pass

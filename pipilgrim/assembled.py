@@ -150,8 +150,11 @@ def _binding_type(annotation: Any, owner: type, name: str) -> Any:
     Resolves one annotation as `typing.get_type_hints` would, against the module and class it was written in:
     strings and forward references, nested ones included, and `Annotated` metadata dropped.
     """
-    alone = type(owner.__name__, (), {"__annotations__": {name: annotation}, "__module__": owner.__module__})
-    hints = typing.get_type_hints(alone, vars(sys.modules[owner.__module__]), dict(vars(owner)))
+    alone = type(owner.__name__, (), {"__annotations__": {name: annotation}})
+    module = getattr(sys.modules.get(owner.__module__), "__dict__", {})
+    # Swapped, as get_type_hints does for a class, so module names win over the class's own, which may be the very
+    # attribute being resolved, and nested classes are still found.
+    hints = typing.get_type_hints(alone, dict(vars(owner)), module)
     return hints[name]
 
 

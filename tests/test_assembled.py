@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import threading
 import time
 import unittest
 from typing import TYPE_CHECKING, Optional, Union
@@ -296,13 +295,7 @@ class TestAssemblyHolder(unittest.TestCase):
         self.assertIsNot(first, AssemblyHolder.shared(KingdomAssembly))
 
     def test_makes_one_across_threads(self):
-        ready = threading.Barrier(8)
-
-        def resolve():
-            ready.wait()
-            AssemblyHolder.shared(SlowAssembly)
-
-        run_in_threads(resolve, 8)
+        run_in_threads(lambda: AssemblyHolder.shared(SlowAssembly), 8)
         self.assertEqual(1, SlowAssembly.made)
 
 

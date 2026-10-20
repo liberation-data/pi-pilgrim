@@ -178,7 +178,7 @@ class PilgrimAssembly:
             raise PilgrimError(f"Circular dependency in initializers: {path}. Break it with configure=.")
 
         made_mark = len(self._made)
-        # Held here, since a configure that runs below swaps the queue for a new one.
+        # The queue this call adds to, and undoes on failure, though _configure_graph swaps in a new one below.
         configures = self._pending_configures
         configure_mark = len(configures)
         self._request_depth += 1
@@ -275,7 +275,7 @@ def _caller_name(frame: types.FrameType) -> Hashable:
             arguments += tuple(values[code.co_varnames[count]])
         if flags & inspect.CO_VARKEYWORDS:
             arguments += (tuple(sorted(values[code.co_varnames[count + star_args]].items())),)
-    except (KeyError, NameError):
+    except KeyError:
         raise PilgrimError(
             f"{code.co_qualname} deleted one of its arguments, which name its instance. Leave them as they were "
             f"passed until the lifecycle is called."
