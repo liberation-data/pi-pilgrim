@@ -125,8 +125,9 @@ class _Assembled:
                     ) from None
                 except (AttributeError, SyntaxError) as e:
                     # Raised as an AttributeError, it would reach the owner's __getattr__, if it has one.
+                    written = getattr(annotation, "__forward_arg__", annotation)
                     raise PilgrimError(
-                        f"{self.owner.__name__}.{self.name}'s annotation {annotation!r} can't be resolved: {e}."
+                        f"{self.owner.__name__}.{self.name}'s annotation {written!r} can't be resolved: {e}."
                     ) from None
         raise PilgrimError(f"{self.owner.__name__}.{self.name} needs a type annotation or a key to be Assembled.")
 

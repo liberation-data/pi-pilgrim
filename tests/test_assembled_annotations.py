@@ -41,6 +41,10 @@ class Muster(Lenient):
     knight: "typing.Nope" = Assembled(assembly=ArmyAssembly)  # noqa: F821
 
 
+class Garbled:
+    knight: "list[" = Assembled(assembly=ArmyAssembly)  # noqa: F722
+
+
 class Camp:
     marked: Annotated[Knight, "marked"] = Assembled(assembly=ArmyAssembly)
     quoted: "Knight" = Assembled(assembly=ArmyAssembly)
@@ -84,6 +88,18 @@ class TestAssembledAnnotations(unittest.TestCase):
     def test_an_annotation_that_cant_be_resolved_isnt_left_to_getattr(self):
         with self.assertRaisesRegex(PilgrimError, r"Muster.knight's annotation 'typing.Nope' can't be resolved"):
             Muster().knight
+
+    def test_an_annotation_that_cant_be_parsed_says_so(self):
+        with self.assertRaisesRegex(PilgrimError, r"Garbled.knight's annotation 'list\[' can't be resolved"):
+            Garbled().knight
+
+    @unittest.skipIf(sys.version_info < (3, 14), "annotations are evaluated lazily from 3.14")
+    def test_a_lazy_annotation_that_cant_be_resolved_is_shown_as_written(self):
+        class Tower(Lenient):
+            knight: typing.Nope = Assembled(assembly=ArmyAssembly)
+
+        with self.assertRaisesRegex(PilgrimError, r"Tower.knight's annotation 'typing.Nope' can't be resolved"):
+            Tower().knight
 
     def test_added_after_the_class_is_made_says_so(self):
         class Gate:
