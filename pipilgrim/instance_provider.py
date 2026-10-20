@@ -1,21 +1,14 @@
-from typing import TypeVar
+from typing import Protocol, TypeVar, runtime_checkable
 
-T = TypeVar("T")
+T = TypeVar("T", covariant=True)
 
 
-class InstanceProviderMeta(type):
+@runtime_checkable
+class InstanceProvider(Protocol[T]):
     """
-    Any object with a callable `provide` counts as an InstanceProvider, whether or not it subclasses one.
+    Provides a value for an assembly to inject: `FileResource` reads a file, for example. Any object with a
+    `provide()` method counts as one, whether or not it subclasses InstanceProvider. As with any runtime-checkable
+    protocol, `isinstance` checks only that `provide` is there.
     """
 
-    def __instancecheck__(cls, instance):
-        return cls.__subclasscheck__(type(instance))
-
-    def __subclasscheck__(cls, subclass):
-        return hasattr(subclass, "provide") and callable(subclass.provide)
-
-
-class InstanceProvider(metaclass=InstanceProviderMeta):
-    """
-    Provides a value for an assembly to inject: `FileResource` reads a file, for example.
-    """
+    def provide(self) -> T: ...

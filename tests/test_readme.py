@@ -2,7 +2,7 @@ import unittest
 
 from pipilgrim import Assembled, AssemblyHolder, PilgrimAssembly, PilgrimConfigurable, PilgrimError
 
-# The README's examples, as written there, so the docs can't drift from the code.
+# The README's examples, adapted to run together: names differ where examples would clash.
 
 
 class Map:
@@ -121,6 +121,18 @@ class TestQuestAssembly(QuestAssembly):
         return self.shared(lambda: FakeMap())
 
 
+class RecordingMap(Map):
+    def __init__(self, real):
+        super().__init__(real.region)
+        self.real = real
+
+
+class RecordingQuestAssembly(QuestAssembly):
+    def map(self) -> Map:
+        real = super().map
+        return self.shared(lambda: RecordingMap(real()))
+
+
 class Tavern:
     knight: Knight = Assembled()
     quest: HolyGrailQuest = Assembled(key="damsel_quest")
@@ -180,10 +192,18 @@ class TestReadme(unittest.TestCase):
         self.assertIs(AssemblyHolder.shared(QuestAssembly), tavern.assembly)
 
     def test_imported_bindings_inject_through_the_importer(self):
-        self.assertIs(AssemblyHolder.shared(MapAssembly).map(), AssemblyHolder.shared(QuestAssembly).factory_for(Map)())
+        imported = AssemblyHolder.shared(QuestAssembly).factory_for(Map)
+        self.assertIs(AssemblyHolder.shared(MapAssembly).map(), imported())
 
     def test_overriding_one_component(self):
         self.assertEqual("Nowhere", TestQuestAssembly().knight().quest.map.region)
+
+    def test_an_override_builds_on_super(self):
+        assembly = RecordingQuestAssembly()
+        recorded = assembly.knight().quest.map
+        self.assertIsInstance(recorded, RecordingMap)
+        self.assertIs(AssemblyHolder.shared(MapAssembly).map(), recorded.real)
+        self.assertIs(recorded, assembly.map())
 
 
 if __name__ == "__main__":

@@ -1,3 +1,4 @@
+import inspect
 import sys
 import threading
 import types
@@ -35,23 +36,23 @@ class PilgrimAssembly:
 
     class Lifecycle(Enum):
         SHARED = "shared"
-        WEAK_SHARED = "weakShared"
-        OBJECT_GRAPH = "objectGraph"
+        WEAK_SHARED = "weak_shared"
+        OBJECT_GRAPH = "object_graph"
         UNSHARED = "unshared"
 
-    def __init__(self):
-        self.bindings: Dict[Hashable, Callable[[], Any]] = {}
-        self.shared_instances: Dict[Hashable, Any] = {}
-        self.weak_shared_instances: Dict[Hashable, weakref.ref] = {}
-        self.scoped_instances: Dict[Hashable, Any] = {}
-        # Shared and weak_shared instances made by the request in progress. Other threads see them once the request
-        # is done, so none of them gets an instance whose configure hasn't run yet.
-        self._made: Dict[Tuple["PilgrimAssembly.Lifecycle", Hashable], Any] = {}
-        self._instance_stack: List[Tuple["PilgrimAssembly.Lifecycle", Hashable]] = []
-        self._configure_stack: List[Callable[[], None]] = []
+    def __init__(self) -> None:
+        self._bindings: Dict[Any, Callable[[], Any]] = {}
+        self._shared: Dict[Hashable, Any] = {}
+        self._weak_shared: weakref.WeakValueDictionary[Hashable, Any] = weakref.WeakValueDictionary()
+        # Shared, weak_shared and object_graph instances made by the request in progress. Other threads see the
+        # shared and weak_shared ones once the request is done, so none of them gets an instance whose configure
+        # hasn't run yet.
+        self._made: Dict[_Key, Any] = {}
+        self._instance_stack: List[_Key] = []
+        self._pending_configures: List[Callable[[], None]] = []
         self._request_depth = 0
         self._lock = threading.RLock()
-        self.make_injectable(lambda: self, by_type=type(self))
+        self._bind_self()
         self.make_bindings()
 
     # ----- Lifecycles -----
@@ -61,14 +62,10 @@ class PilgrimAssembly:
         One instance for the life of the assembly.
         """
         name = _caller_name(sys._getframe(1))
-        instance = self.shared_instances.get(name, _MISSING)
+        instance = self._shared.get(name, _MISSING)
         if instance is not _MISSING:
-            return instance
-        with self._lock:
-            instance = self.shared_instances.get(name, self._made.get((self.Lifecycle.SHARED, name), _MISSING))
-            if instance is not _MISSING:
-                return instance
-            return self._inject(self.Lifecycle.SHARED, name, factory, configure)
+            return instance  # type: ignore[no-any-return]
+        return self._resolve(_SHARED, name, factory, configure)
 
     def weak_shared(self, factory: Callable[[], T], configure: Optional[Callable[[T], None]] = None) -> T:
         """
@@ -76,26 +73,17 @@ class PilgrimAssembly:
         must support weak references: most classes do, but `int`, `str`, `list` and `dict` don't.
         """
         name = _caller_name(sys._getframe(1))
-        instance = _alive(self.weak_shared_instances.get(name))
+        instance = self._weak_shared.get(name)
         if instance is not None:
-            return instance
-        with self._lock:
-            instance = self._made.get((self.Lifecycle.WEAK_SHARED, name)) or _alive(self.weak_shared_instances.get(name))
-            if instance is not None:
-                return instance
-            return self._inject(self.Lifecycle.WEAK_SHARED, name, factory, configure)
+            return instance  # type: ignore[no-any-return]
+        return self._resolve(_WEAK_SHARED, name, factory, configure)
 
     def object_graph(self, factory: Callable[[], T], configure: Optional[Callable[[T], None]] = None) -> T:
         """
         One instance for each request: everything built while resolving one component shares it, and the next
         request makes a new one.
         """
-        name = _caller_name(sys._getframe(1))
-        with self._lock:
-            instance = self.scoped_instances.get(name, _MISSING)
-            if instance is not _MISSING:
-                return instance
-            return self._inject(self.Lifecycle.OBJECT_GRAPH, name, factory, configure)
+        return self._resolve(_OBJECT_GRAPH, _caller_name(sys._getframe(1)), factory, configure)
 
     def unshared(self, factory: Callable[[], T], configure: Optional[Callable[[T], None]] = None) -> T:
         """
@@ -104,7 +92,7 @@ class PilgrimAssembly:
         # Nothing is kept under this name, so the arguments needn't be part of it.
         name = sys._getframe(1).f_code.co_qualname
         with self._lock:
-            return self._inject(self.Lifecycle.UNSHARED, name, factory, configure)
+            return self._inject(_UNSHARED, name, factory, configure)
 
     # ----- Bindings -----
 
@@ -113,116 +101,186 @@ class PilgrimAssembly:
         Override to declare which components `Assembled` can inject, with `make_injectable` and `import_bindings`.
         """
 
-    def make_injectable(self, factory: Callable[[], Any], by_type: Any = None, by_key: Optional[str] = None) -> None:
+    def make_injectable(
+        self, factory: Callable[[], Any], by_type: Any = None, by_key: Optional[Hashable] = None
+    ) -> None:
         """
         Lets `Assembled` inject what `factory` returns: by type, when the attribute is annotated with `by_type`, or
         by key, when it names `by_key`. A factory is usually one of the assembly's methods.
         """
         if (by_type is None) == (by_key is None):
             raise PilgrimError("make_injectable takes one of by_type or by_key.")
-        self.bindings[_binding_key(by_type) if by_type is not None else by_key] = factory
+        self._bindings[_binding_key(by_type) if by_type is not None else by_key] = factory
 
     def import_bindings(self, *assemblies: "PilgrimAssembly") -> None:
         """
-        Makes the bindings of other assemblies injectable through this one.
+        Makes the bindings of other assemblies injectable through this one. An imported binding replaces one
+        declared before it under the same type or key, except for this assembly's own types.
         """
         for assembly in assemblies:
-            self.bindings.update(assembly.bindings)
-        self.make_injectable(lambda: self, by_type=type(self))
+            self._bindings.update(assembly._bindings)
+        self._bind_self()
 
     def factory_for(self, key: Any) -> Optional[Callable[[], Any]]:
-        return self.bindings.get(_binding_key(key))
+        """
+        The factory bound to a type or key, or None.
+        """
+        return self._bindings.get(_binding_key(key))
+
+    def _bind_self(self) -> None:
+        # Injectable as each assembly class it is, so a test subclass stands in for the assembly it overrides.
+        for it in type(self).__mro__:
+            if issubclass(it, PilgrimAssembly) and it is not PilgrimAssembly:
+                self._bindings[it] = lambda: self
 
     # ----- Resolving -----
 
-    def _inject(self, lifecycle: "PilgrimAssembly.Lifecycle", name: Hashable, factory, configure):
+    def _resolve(
+        self,
+        lifecycle: "PilgrimAssembly.Lifecycle",
+        name: Hashable,
+        factory: Callable[[], T],
+        configure: Optional[Callable[[T], None]],
+    ) -> T:
+        """
+        Looks again under the lock, since another thread may have published the instance while this one waited.
+        """
+        with self._lock:
+            instance = self._made.get((lifecycle, name), _MISSING)
+            if instance is _MISSING:
+                instance = self._published(lifecycle, name)
+            if instance is _MISSING:
+                instance = self._inject(lifecycle, name, factory, configure)
+            return typing.cast(T, instance)
+
+    def _published(self, lifecycle: "PilgrimAssembly.Lifecycle", name: Hashable) -> Any:
+        if lifecycle is _SHARED:
+            return self._shared.get(name, _MISSING)
+        if lifecycle is _WEAK_SHARED:
+            instance = self._weak_shared.get(name)
+            return _MISSING if instance is None else instance
+        return _MISSING
+
+    def _inject(
+        self,
+        lifecycle: "PilgrimAssembly.Lifecycle",
+        name: Hashable,
+        factory: Callable[[], T],
+        configure: Optional[Callable[[T], None]],
+    ) -> T:
+        """
+        Makes one instance. A failure undoes what this call made, so nothing half-built is kept or configured, and
+        a request that catches the failure carries on. The outermost call publishes the request's instances.
+        """
         key = (lifecycle, name)
-        if lifecycle is not self.Lifecycle.UNSHARED and key in self._instance_stack:
+        # An unshared method may call itself for a new instance each time, so it isn't checked for a cycle.
+        if lifecycle is not _UNSHARED and key in self._instance_stack:
             path = " -> ".join(_describe(it) for it in self._instance_stack + [key])
             raise PilgrimError(f"Circular dependency in initializers: {path}. Break it with configure=.")
 
+        made_mark = len(self._made)
+        # The queue this call adds to, and undoes on failure, though _configure_graph swaps in a new one below.
+        configures = self._pending_configures
+        configure_mark = len(configures)
+        self._request_depth += 1
+        try:
+            instance = self._make(key, factory)
+            if lifecycle is not _UNSHARED:
+                self._made[key] = instance
+            if configure is not None:
+                configures.append(lambda: configure(instance))
+            if isinstance(instance, PilgrimConfigurable):
+                configures.append(lambda: instance.configure(self))
+            # The graph is built once nothing is being made, though a configure may still be resolving more.
+            if not self._instance_stack:
+                self._configure_graph()
+        except BaseException:
+            for it in list(self._made)[made_mark:]:
+                del self._made[it]
+            del configures[configure_mark:]
+            raise
+        finally:
+            self._request_depth -= 1
+
+        # The request is done once the call that began it returns, configures included.
+        if self._request_depth == 0:
+            self._publish()
+        return instance
+
+    def _make(self, key: "_Key", factory: Callable[[], T]) -> T:
         self._instance_stack.append(key)
         try:
             instance = factory()
-            if lifecycle is self.Lifecycle.WEAK_SHARED:
-                try:
-                    weakref.ref(instance)
-                except TypeError:
-                    raise PilgrimError(
-                        f"{_describe(key)} made a {type(instance).__name__}, which can't be weakly referenced. "
-                        f"Use shared, or wrap it in a class."
-                    ) from None
-        except BaseException:
+        finally:
             self._instance_stack.pop()
-            if self._request_depth == 0 and not self._instance_stack:
-                self._abandon()
-            raise
-        self._instance_stack.pop()
-
-        if lifecycle is self.Lifecycle.OBJECT_GRAPH:
-            self.scoped_instances[name] = instance
-        elif lifecycle is not self.Lifecycle.UNSHARED:
-            self._made[key] = instance
-
-        if configure is not None:
-            self._configure_stack.append(lambda: configure(instance))
-        if isinstance(instance, PilgrimConfigurable):
-            self._configure_stack.append(lambda: instance.configure(self))
-
-        if not self._instance_stack:
-            # A configure may resolve more components, which start a configure stack of their own.
-            delayed = self._configure_stack
-            self._configure_stack = []
-            self._request_depth += 1
+        if key[0] is _WEAK_SHARED:
             try:
-                for it in delayed:
-                    it()
-            except BaseException:
-                self._request_depth -= 1
-                if self._request_depth == 0:
-                    self._abandon()
-                raise
-            self._request_depth -= 1
-            if self._request_depth == 0:
-                self._publish()
+                weakref.ref(instance)
+            except TypeError:
+                raise PilgrimError(
+                    f"{_describe(key)} made a {type(instance).__name__}, which can't be weakly referenced. "
+                    f"Use shared, or wrap it in a class."
+                ) from None
         return instance
+
+    def _configure_graph(self) -> None:
+        """
+        Every instance in the graph has been made, so each may finish its set-up, in the order they were made:
+        `configure=` first, then `PilgrimConfigurable.configure`. A configure may resolve more components, which
+        queue configures of their own.
+        """
+        delayed = self._pending_configures
+        self._pending_configures = []
+        for it in delayed:
+            it()
 
     def _publish(self) -> None:
         """
         The whole request is done: its shared instances are ready for everyone, and its object_graph ones are let go.
         """
         for (lifecycle, name), instance in self._made.items():
-            if lifecycle is self.Lifecycle.SHARED:
-                self.shared_instances[name] = instance
-            else:
-                self.weak_shared_instances[name] = weakref.ref(instance)
+            if lifecycle is _SHARED:
+                self._shared[name] = instance
+            elif lifecycle is _WEAK_SHARED:
+                self._weak_shared[name] = instance
         self._made.clear()
-        self.scoped_instances.clear()
-
-    def _abandon(self) -> None:
-        """
-        The request failed: nothing it made is kept, so the next request starts clean.
-        """
-        self._instance_stack.clear()
-        self._configure_stack.clear()
-        self._made.clear()
-        self.scoped_instances.clear()
 
 
-_MISSING = object()
+_SHARED = PilgrimAssembly.Lifecycle.SHARED
+_WEAK_SHARED = PilgrimAssembly.Lifecycle.WEAK_SHARED
+_OBJECT_GRAPH = PilgrimAssembly.Lifecycle.OBJECT_GRAPH
+_UNSHARED = PilgrimAssembly.Lifecycle.UNSHARED
+_Key = Tuple[PilgrimAssembly.Lifecycle, Hashable]
+
+_MISSING: Any = object()
+_STAR_ARGUMENTS = inspect.CO_VARARGS | inspect.CO_VARKEYWORDS
 
 
-def _caller_name(frame) -> Hashable:
+def _caller_name(frame: types.FrameType) -> Hashable:
     """
     Names a component by the assembly method that makes it, and that method's arguments, if it has any. Reading the
     caller's frame costs well under a microsecond, where inspect.stack() reads every frame and its source.
+
+    The arguments are read as they are when the lifecycle is called, so the method mustn't rebind them before then.
     """
     code = frame.f_code
     count = code.co_argcount + code.co_kwonlyargcount
-    if count <= 1:
+    flags = code.co_flags
+    if count <= 1 and not flags & _STAR_ARGUMENTS:
         return code.co_qualname
+    star_args = bool(flags & inspect.CO_VARARGS)
     values = frame.f_locals
-    arguments = tuple(values[it] for it in code.co_varnames[1:count])
+    try:
+        arguments = tuple(values[it] for it in code.co_varnames[1:count])
+        if star_args:
+            arguments += tuple(values[code.co_varnames[count]])
+        if flags & inspect.CO_VARKEYWORDS:
+            arguments += (tuple(sorted(values[code.co_varnames[count + star_args]].items())),)
+    except KeyError:
+        raise PilgrimError(
+            f"{code.co_qualname} deleted one of its arguments, which name its instance. Leave them as they were "
+            f"passed until the lifecycle is called."
+        ) from None
     try:
         hash(arguments)
     except TypeError:
@@ -233,14 +291,10 @@ def _caller_name(frame) -> Hashable:
     return code.co_qualname, arguments
 
 
-def _alive(reference: Optional[weakref.ref]):
-    return reference() if reference is not None else None
-
-
-def _describe(key) -> str:
+def _describe(key: _Key) -> str:
     lifecycle, name = key
     if isinstance(name, tuple):
-        name = f"{name[0]}{name[1]!r}"
+        name = f"{name[0]}({', '.join(map(repr, name[1]))})"
     return f"{lifecycle.value}({name})"
 
 

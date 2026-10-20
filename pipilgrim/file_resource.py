@@ -3,7 +3,7 @@ from pathlib import Path
 from pipilgrim.instance_provider import InstanceProvider
 
 
-class FileResource(InstanceProvider):
+class FileResource(InstanceProvider[str]):
     """
     Provides the text of a file, relative to a root directory: often `os.path.dirname(__file__)`.
     """

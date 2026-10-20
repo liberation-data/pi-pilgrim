@@ -4,7 +4,7 @@
 [Typhoon](https://github.com/appsquickly/typhoon).
 
 - **Plain Python.** An assembly is a class, and each component is a method that says how to make it. No decorators
-  on your classes, no container configuration, no string lookups, nothing generated.
+  on your classes, no container configuration, no string lookups unless you choose a key, nothing generated.
 - **A composition root.** The key actors in your application, and how they're wired together, are written down in
   one place, as code your IDE can follow and refactor.
 - **Lifecycles:** `shared`, `weak_shared`, `object_graph` (Typhoon's idea: one instance for each graph that's
@@ -89,6 +89,7 @@ assembly.kingdom("Wessex")            # the same Kingdom on every call with "Wes
 ```
 
 A `shared`, `weak_shared` or `object_graph` component's arguments must be hashable. An `unshared` one's needn't be.
+Arguments that are equal name the same instance, so `kingdom(1)` and `kingdom(1.0)` are one kingdom.
 
 ## Circular dependencies
 
@@ -107,8 +108,9 @@ class QuestAssembly(PilgrimAssembly):
         )
 ```
 
-Pilgrim runs every `configure` once each instance in the request has been made, so `self.knight()` returns the
-knight that holds this squire. A cycle through initializers alone is an error that names the cycle:
+Pilgrim runs every `configure` once each instance in the request has been made, in the order they were made, so
+`self.knight()` returns the knight that holds this squire. A cycle through initializers alone is an error that names
+the cycle, if any component in it is `shared`, `weak_shared` or `object_graph`:
 
 ```
 PilgrimError: Circular dependency in initializers: shared(QuestAssembly.knight) -> shared(QuestAssembly.squire)
@@ -187,13 +189,20 @@ class QuestAssembly(PilgrimAssembly):
 `FileResource` provides the text of a file, relative to a directory:
 
 ```python
-def quest(self) -> Quest:
-    return self.shared(lambda: HolyGrailQuest(
-        description=FileResource(os.path.dirname(__file__), "quest.txt").provide()
-    ))
+import os
+
+from pipilgrim import FileResource
+
+
+class QuestAssembly(PilgrimAssembly):
+    def quest(self) -> Quest:
+        return self.shared(lambda: HolyGrailQuest(
+            description=FileResource(os.path.dirname(__file__), "quest.txt").provide()
+        ))
 ```
 
-Any object with a `provide()` method counts as an `InstanceProvider`, so you can write your own.
+`InstanceProvider` is the protocol for things like this: any object with a `provide()` method counts as one, so
+you can write your own and call them the same way.
 
 ## Testing
 
@@ -206,13 +215,23 @@ Any object with a `provide()` method counts as an `InstanceProvider`, so you can
           return self.shared(lambda: FakeMap())
   ```
 
-  An override can build on the method it replaces with `super().map()`.
+  An override can build on the method it replaces. Take `super().map` before the lambda, since `super()` with no
+  arguments doesn't work inside one:
+
+  ```python
+  class TestQuestAssembly(QuestAssembly):
+      def map(self) -> Map:
+          real = super().map
+          return self.shared(lambda: RecordingMap(real()))
+  ```
 - `AssemblyHolder.reset()` forgets every assembly and the default, so each test can start clean.
 
 ## Threads and asyncio
 
-Resolving is thread-safe. One thread builds a graph at a time, and a `shared` component is made once however many
-threads ask for it at once. A `shared` component that already exists is returned without taking the lock.
+Resolving is thread-safe. One thread at a time builds a graph from an assembly, and a `shared` component is made
+once however many threads ask for it at once. A `shared` or `weak_shared` component that already exists is returned
+without taking the lock. Each assembly has its own lock, so one assembly may call into another, as `QuestAssembly`
+calls `MapAssembly` above, but not back: two threads could each hold one lock and wait for the other.
 
 Factories are plain functions, so a resolve never awaits and asyncio tasks can't interleave inside one. Make
 components that need async set-up, such as a connection pool, in the assembly, and open them at start-up:
@@ -226,7 +245,8 @@ await assembly.database().connect()
 
 A lifecycle names the component by the method that called it, read from the caller's frame, along with that
 method's arguments. So call the lifecycle directly from the assembly method, as every example here does, and not
-from a helper that the method calls: the helper's name would be used instead.
+from a helper that the method calls: the helper's name would be used instead. And leave the arguments as they were
+passed until then, since their values at that point are what name the instance.
 
 Reading the frame costs well under a microsecond, where `inspect.stack()` reads every frame and its source file.
 Resolving a `shared` component that already exists takes about 0.3 µs, and making an `unshared` one about 1 µs, on
@@ -234,11 +254,12 @@ an Apple M2 Max.
 
 ## Upgrading from 0.1
 
-Assemblies written for 0.1 work unchanged. In 0.2:
+Assemblies written for 0.1 work unchanged, unless they reach into the assembly's internals, such as `bindings`,
+`shared_instances` or `inject`, which are now private. In 0.2:
 
 - Resolving is about 600 times faster, and thread-safe.
 - `weak_shared`, `PilgrimConfigurable`, `Assembled`, `AssemblyHolder` and bindings are new, and a method's
-  arguments now name its instance.
+  arguments, `*args` and `**kwargs` included, now name its instance.
 - Errors are `PilgrimError`, and a circular dependency names the cycle.
 - A component is named by its method's qualified name, so an override no longer clashes with the method it
   overrides.

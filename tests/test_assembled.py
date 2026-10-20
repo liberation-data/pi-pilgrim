@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import time
 import unittest
-from typing import Optional
+from typing import TYPE_CHECKING, Optional, Union
 
 from pipilgrim import Assembled, AssemblyHolder, PilgrimAssembly, PilgrimError
 from tests.utils.castle import Castle
 from tests.utils.knight import Knight
 from tests.utils.quest import DamselInDistressQuest, HolyGrailQuest, Quest
+from tests.utils.threads import run_in_threads
+
+if TYPE_CHECKING:
+    from decimal import Decimal
 
 
 class StableAssembly(PilgrimAssembly):
@@ -35,6 +40,91 @@ class KingdomAssembly(PilgrimAssembly):
         return self.shared(lambda: Castle(name="Camelot", foo="bar"))
 
 
+class TestKingdomAssembly(KingdomAssembly):
+    pass
+
+
+class SlowAssembly(PilgrimAssembly):
+    made = 0
+
+    def __init__(self):
+        time.sleep(0.05)
+        SlowAssembly.made += 1
+        super().__init__()
+
+
+class SlowlyBoundAssembly(PilgrimAssembly):
+    def make_bindings(self):
+        self.make_injectable(self.token, by_key="token")
+
+    def token(self):
+        def make():
+            time.sleep(0.05)
+            return object()
+
+        return self.unshared(make)
+
+
+class ArmoryBase(PilgrimAssembly):
+    pass
+
+
+class Armory(ArmoryBase):
+    def make_bindings(self):
+        self.import_bindings(ArmoryBase())
+
+
+class Inherited:
+    knight: Knight
+
+
+class Heir(Inherited):
+    knight = Assembled(assembly=KingdomAssembly)
+
+
+class Hall:
+    class Banner:
+        pass
+
+    banner: "Banner" = Assembled(assembly=KingdomAssembly)
+    ledger: Decimal = Assembled(assembly=KingdomAssembly)
+
+
+class FirstAssembly(PilgrimAssembly):
+    def make_bindings(self):
+        self.make_injectable(lambda: "first", by_key="a")
+        self.make_injectable(lambda: "first", by_key="both")
+
+
+class SecondAssembly(PilgrimAssembly):
+    def make_bindings(self):
+        self.make_injectable(lambda: "second", by_key="b")
+        self.make_injectable(lambda: "second", by_key="both")
+
+
+class ImportingAssembly(PilgrimAssembly):
+    def make_bindings(self):
+        self.make_injectable(lambda: "own", by_key="a")
+        self.make_injectable(lambda: "a castle", by_type=Optional[Castle])
+        self.make_injectable(lambda: "zero", by_key=0)
+        self.import_bindings(FirstAssembly(), SecondAssembly())
+
+
+class Banners:
+    class Banner:
+        pass
+
+    banner: "Banner"
+
+
+class Keep(Banners):
+    banner = Assembled(assembly=KingdomAssembly)
+
+
+class Zero:
+    motto = Assembled(key=0, assembly=ImportingAssembly)
+
+
 class RoundTable:
     knight: Knight = Assembled(assembly=KingdomAssembly)
     quest: Quest = Assembled(assembly=KingdomAssembly)
@@ -43,6 +133,9 @@ class RoundTable:
     damsel: DamselInDistressQuest = Assembled(assembly=KingdomAssembly)
     kingdom: KingdomAssembly = Assembled(assembly=KingdomAssembly)
     later: Squire = Assembled(assembly=KingdomAssembly)
+    keep: Castle | None = Assembled(assembly=KingdomAssembly)
+    nowhere = Assembled(key="nowhere", assembly=KingdomAssembly)
+    price: Decimal
 
 
 class Tavern:
@@ -52,6 +145,16 @@ class Tavern:
 
 class Squire:
     pass
+
+
+class Steward:
+    kingdom: KingdomAssembly = Assembled()
+    token = Assembled(key="token", assembly=SlowlyBoundAssembly)
+
+
+class Page:
+    __slots__ = ()
+    knight: Knight = Assembled(assembly=KingdomAssembly)
 
 
 class TestAssembled(unittest.TestCase):
@@ -102,10 +205,98 @@ class TestAssembled(unittest.TestCase):
 
     def test_make_injectable_takes_one_way_in(self):
         assembly = KingdomAssembly()
-        with self.assertRaises(PilgrimError):
+        with self.assertRaisesRegex(PilgrimError, "one of by_type or by_key"):
             assembly.make_injectable(assembly.knight)
-        with self.assertRaises(PilgrimError):
+        with self.assertRaisesRegex(PilgrimError, "one of by_type or by_key"):
             assembly.make_injectable(assembly.knight, by_type=Knight, by_key="knight")
+
+    def test_union_with_none_injects_as_the_type(self):
+        self.assertEqual("Camelot", RoundTable().keep.name)
+        self.assertIsNone(KingdomAssembly().factory_for(Union[Castle, Knight]))
+
+    def test_an_unresolvable_annotation_elsewhere_doesnt_matter(self):
+        self.assertIsInstance(RoundTable().knight, Knight)
+
+    def test_a_missing_key_names_the_key(self):
+        with self.assertRaisesRegex(PilgrimError, "no binding for 'nowhere', needed by RoundTable.nowhere"):
+            RoundTable().nowhere
+
+    def test_a_subclass_injects_as_the_assembly_it_overrides(self):
+        AssemblyHolder.default_assembly_type = TestKingdomAssembly
+        self.assertIs(AssemblyHolder.shared(TestKingdomAssembly), Steward().kingdom)
+
+    def test_imports_inject_the_imported_assembly_and_keep_the_importer(self):
+        kingdom = KingdomAssembly()
+        self.assertIs(AssemblyHolder.shared(StableAssembly), kingdom.factory_for(StableAssembly)())
+        self.assertIs(kingdom, kingdom.factory_for(KingdomAssembly)())
+
+    def test_an_import_doesnt_replace_the_importer(self):
+        armory = Armory()
+        self.assertIs(armory, armory.factory_for(ArmoryBase)())
+        self.assertIsNone(armory.factory_for(PilgrimAssembly))
+
+    def test_reads_an_annotation_from_a_base_class(self):
+        self.assertIsInstance(Heir().knight, Knight)
+
+    def test_resolves_an_inherited_annotation_where_it_was_written(self):
+        with self.assertRaisesRegex(PilgrimError, "no binding for Banner, needed by Keep.banner"):
+            Keep().banner
+
+    def test_a_later_import_replaces_an_earlier_binding(self):
+        assembly = ImportingAssembly()
+        self.assertEqual("first", assembly.factory_for("a")())
+        self.assertEqual("second", assembly.factory_for("b")())
+        self.assertEqual("second", assembly.factory_for("both")())
+
+    def test_binding_an_optional_binds_the_type(self):
+        self.assertEqual("a castle", ImportingAssembly().factory_for(Castle)())
+
+    def test_a_falsy_key_is_a_key(self):
+        self.assertEqual("zero", Zero().motto)
+
+    def test_names_a_nested_class_annotation(self):
+        # Nothing binds Banner, so the error shows the annotation was resolved to the class.
+        with self.assertRaisesRegex(PilgrimError, "no binding for Banner"):
+            Hall().banner
+
+    def test_an_annotation_that_cant_be_found_says_so(self):
+        with self.assertRaisesRegex(PilgrimError, "Hall.ledger is annotated with Decimal, which can't be found"):
+            Hall().ledger
+
+    def test_threads_see_one_value_for_an_object(self):
+        steward, seen = Steward(), []
+        run_in_threads(lambda: seen.append(steward.token), 2)
+        self.assertIs(seen[0], seen[1])
+        self.assertIs(seen[0], steward.token)
+
+    def test_slots_without_dict_say_so(self):
+        with self.assertRaisesRegex(PilgrimError, "Page has __slots__"):
+            Page().knight
+
+    def test_the_class_attribute_is_the_descriptor(self):
+        self.assertIsInstance(RoundTable.knight, Assembled)
+
+
+class TestAssemblyHolder(unittest.TestCase):
+    def setUp(self):
+        SlowAssembly.made = 0
+        AssemblyHolder.reset()
+
+    def tearDown(self):
+        AssemblyHolder.reset()
+
+    def test_holds_one_of_each_until_reset(self):
+        first = AssemblyHolder.shared(KingdomAssembly)
+        self.assertIs(first, AssemblyHolder.shared(KingdomAssembly))
+        AssemblyHolder.default_assembly_type = KingdomAssembly
+        self.assertIs(first, AssemblyHolder.shared())
+        AssemblyHolder.reset()
+        self.assertIsNone(AssemblyHolder.default_assembly_type)
+        self.assertIsNot(first, AssemblyHolder.shared(KingdomAssembly))
+
+    def test_makes_one_across_threads(self):
+        run_in_threads(lambda: AssemblyHolder.shared(SlowAssembly), 8)
+        self.assertEqual(1, SlowAssembly.made)
 
 
 if __name__ == "__main__":
