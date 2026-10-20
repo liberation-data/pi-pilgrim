@@ -12,6 +12,11 @@ class TestResources(unittest.TestCase):
             (Path(root) / "scrolls" / "quest.txt").write_text("Café", encoding="latin-1")
             self.assertEqual("Café", FileResource(root, "scrolls/quest.txt", encoding="latin-1").provide())
 
+    def test_file_resource_reads_utf_8_by_default(self):
+        with tempfile.TemporaryDirectory() as root:
+            (Path(root) / "quest.txt").write_text("Café", encoding="utf-8")
+            self.assertEqual("Café", FileResource(root, "quest.txt").provide())
+
     def test_a_missing_file_raises(self):
         with tempfile.TemporaryDirectory() as root:
             with self.assertRaises(FileNotFoundError):

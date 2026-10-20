@@ -68,6 +68,9 @@ class GarageAssembly(PilgrimAssembly):
     def engines(self, *sizes):
         return self.shared(lambda: Engine(sizes))
 
+    def mixed_engine(self, *sizes, **tags):
+        return self.shared(lambda: Engine((sizes, tags)))
+
     def tagged_engine(self, **tags):
         return self.shared(lambda: Engine(tags))
 
@@ -103,6 +106,22 @@ class GarageAssembly(PilgrimAssembly):
 
     def spare(self):
         return self.object_graph(lambda: Engine())
+
+    def slow_weak_engine(self):
+        def make():
+            time.sleep(0.05)
+            return Engine()
+
+        return self.weak_shared(make)
+
+    def via_unshared(self):
+        return self.shared(lambda: self.hop())
+
+    def hop(self):
+        return self.unshared(lambda: self.via_unshared())
+
+    def named_loop(self, name):
+        return self.shared(lambda: self.named_loop(name))
 
     def slow_engine(self):
         def make():
@@ -262,6 +281,11 @@ class TestLifecycles(unittest.TestCase):
         with self.assertRaisesRegex(PilgrimError, "GarageAssembly.renamed deleted one of its arguments"):
             self.assembly.renamed(1)
 
+    def test_star_arguments_and_keywords_together_name_the_instance(self):
+        self.assertIs(self.assembly.mixed_engine(1, a=2), self.assembly.mixed_engine(1, a=2))
+        self.assertEqual(((1,), {"a": 2}), self.assembly.mixed_engine(1, a=2).size)
+        self.assertIsNot(self.assembly.mixed_engine(1, a=2), self.assembly.mixed_engine(1, a=3))
+
     def test_unshared_takes_unhashable_arguments(self):
         self.assertEqual([1], self.assembly.any_engine([1]).size)
 
@@ -317,6 +341,19 @@ class TestLifecycles(unittest.TestCase):
         cycle = r"shared\(GarageAssembly.loop\(1\)\) -> shared\(GarageAssembly.loop\(1\)\)\."
         with self.assertRaisesRegex(PilgrimError, cycle):
             self.assembly.loop(1)
+
+    def test_a_cycle_names_each_step_and_argument(self):
+        with self.assertRaisesRegex(
+            PilgrimError, r"shared\(GarageAssembly.via_unshared\) -> unshared\(GarageAssembly.hop\) -> shared"
+        ):
+            self.assembly.via_unshared()
+        with self.assertRaisesRegex(PilgrimError, r"named_loop\('v8'\)"):
+            self.assembly.named_loop("v8")
+
+    def test_object_graph_is_let_go_after_the_request(self):
+        made = weakref.ref(self.assembly.spare())
+        gc.collect()
+        self.assertIsNone(made())
 
     def test_unshared_may_recurse_into_itself(self):
         self.assertEqual([2, 1, 0], self.assembly.countdown(2))
@@ -398,6 +435,17 @@ class TestLifecycles(unittest.TestCase):
         def resolve():
             ready.wait()
             seen.append(self.assembly.slow_engine())
+
+        run_in_threads(resolve, 8)
+        self.assertEqual(1, Engine.made)
+        self.assertTrue(all(it is seen[0] for it in seen))
+
+    def test_weak_shared_is_made_once_across_threads(self):
+        seen, ready = [], threading.Barrier(8)
+
+        def resolve():
+            ready.wait()
+            seen.append(self.assembly.slow_weak_engine())
 
         run_in_threads(resolve, 8)
         self.assertEqual(1, Engine.made)

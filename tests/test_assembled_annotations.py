@@ -1,3 +1,4 @@
+import sys
 import unittest
 from typing import Annotated, Optional
 
@@ -44,6 +45,16 @@ class TestAssembledAnnotations(unittest.TestCase):
         self.assertIsInstance(camp.quoted, Knight)
         self.assertIsInstance(camp.maybe, Knight)
         self.assertIsInstance(camp.retinue, Retinue)
+
+    @unittest.skipIf(sys.version_info < (3, 14), "annotations are evaluated lazily from 3.14")
+    def test_a_lazy_annotation_that_cant_be_found_doesnt_stop_the_others(self):
+        class Garrison:
+            knight: Knight = Assembled(assembly=ArmyAssembly)
+            ledger: Undefined = Assembled(assembly=ArmyAssembly)  # noqa: F821
+
+        self.assertIsInstance(Garrison().knight, Knight)
+        with self.assertRaisesRegex(PilgrimError, "Garrison.ledger is annotated with Undefined"):
+            Garrison().ledger
 
     def test_resolves_a_class_defined_in_a_function(self):
         class Herald:

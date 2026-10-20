@@ -91,6 +91,41 @@ class Hall:
     ledger: Decimal = Assembled(assembly=KingdomAssembly)
 
 
+class FirstAssembly(PilgrimAssembly):
+    def make_bindings(self):
+        self.make_injectable(lambda: "first", by_key="a")
+        self.make_injectable(lambda: "first", by_key="both")
+
+
+class SecondAssembly(PilgrimAssembly):
+    def make_bindings(self):
+        self.make_injectable(lambda: "second", by_key="b")
+        self.make_injectable(lambda: "second", by_key="both")
+
+
+class ImportingAssembly(PilgrimAssembly):
+    def make_bindings(self):
+        self.make_injectable(lambda: "own", by_key="a")
+        self.make_injectable(lambda: "a castle", by_type=Optional[Castle])
+        self.make_injectable(lambda: "zero", by_key=0)
+        self.import_bindings(FirstAssembly(), SecondAssembly())
+
+
+class Banners:
+    class Banner:
+        pass
+
+    banner: "Banner"
+
+
+class Keep(Banners):
+    banner = Assembled(assembly=KingdomAssembly)
+
+
+class Zero:
+    motto = Assembled(key=0, assembly=ImportingAssembly)
+
+
 class RoundTable:
     knight: Knight = Assembled(assembly=KingdomAssembly)
     quest: Quest = Assembled(assembly=KingdomAssembly)
@@ -203,6 +238,22 @@ class TestAssembled(unittest.TestCase):
 
     def test_reads_an_annotation_from_a_base_class(self):
         self.assertIsInstance(Heir().knight, Knight)
+
+    def test_resolves_an_inherited_annotation_where_it_was_written(self):
+        with self.assertRaisesRegex(PilgrimError, "no binding for Banner, needed by Keep.banner"):
+            Keep().banner
+
+    def test_a_later_import_replaces_an_earlier_binding(self):
+        assembly = ImportingAssembly()
+        self.assertEqual("first", assembly.factory_for("a")())
+        self.assertEqual("second", assembly.factory_for("b")())
+        self.assertEqual("second", assembly.factory_for("both")())
+
+    def test_binding_an_optional_binds_the_type(self):
+        self.assertEqual("a castle", ImportingAssembly().factory_for(Castle)())
+
+    def test_a_falsy_key_is_a_key(self):
+        self.assertEqual("zero", Zero().motto)
 
     def test_resolves_a_nested_class_annotation(self):
         # Nothing binds Banner, so the error shows the annotation was resolved to the class.
