@@ -184,6 +184,20 @@ class QuestAssembly(PilgrimAssembly):
         return self.shared(lambda: HolyGrailQuest(map=self.maps.map()))
 ```
 
+## Where assemblies live
+
+Give an assembly a module of its own, named for its job: `quests/assembly.py`. A larger application can have one
+for each package, `quests/assembly.py` and `maps/assembly.py`, joined with `AssemblyHolder.shared` as above.
+
+A package's `__init__.py` may re-export its assembly, but shouldn't define it:
+
+- **Python runs `__init__.py` whenever anything in the package is imported.** Importing `quests.knight` runs
+  `quests/__init__.py` first, so an assembly defined there imports every class it wires, on every import from the
+  package.
+- **That makes circular imports.** If a module in the package imports from the package itself, `__init__.py` is
+  part-way through importing it, and the name isn't there yet.
+- **Readers expect `__init__.py` to say what a package exports**, not how it is wired.
+
 ## Resources
 
 `FileResource` provides the text of a file, relative to a directory:
