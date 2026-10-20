@@ -266,19 +266,6 @@ Reading the frame costs well under a microsecond, where `inspect.stack()` reads 
 Resolving a `shared` component that already exists takes about 0.3 µs, and making an `unshared` one about 1 µs, on
 an Apple M2 Max.
 
-## Upgrading from 0.1
-
-Assemblies written for 0.1 work unchanged, unless they reach into the assembly's internals, such as `bindings`,
-`shared_instances` or `inject`, which are now private. In 0.2:
-
-- Resolving is about 600 times faster, and thread-safe.
-- `weak_shared`, `PilgrimConfigurable`, `Assembled`, `AssemblyHolder` and bindings are new, and a method's
-  arguments, `*args` and `**kwargs` included, now name its instance.
-- Errors are `PilgrimError`, and a circular dependency names the cycle.
-- A component is named by its method's qualified name, so an override no longer clashes with the method it
-  overrides.
-- `loguru` and `python-dotenv` are no longer dependencies.
-
 ## License
 
 MIT. Copyright (c) 2024 Liberation Data.
