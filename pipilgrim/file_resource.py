@@ -1,14 +1,17 @@
 from pathlib import Path
-import os
 
 from pipilgrim.instance_provider import InstanceProvider
 
 
 class FileResource(InstanceProvider):
+    """
+    Provides the text of a file, relative to a root directory: often `os.path.dirname(__file__)`.
+    """
 
-    def __init__(self, root_dir: str, path: str) -> str:
-        self.rootDir = root_dir
+    def __init__(self, root_dir: str, path: str, encoding: str = "utf-8"):
+        self.root_dir = root_dir
         self.path = path
+        self.encoding = encoding
 
     def provide(self) -> str:
-        return Path(self.rootDir + os.sep + self.path).read_text()
+        return (Path(self.root_dir) / self.path).read_text(encoding=self.encoding)
