@@ -2,7 +2,7 @@ import unittest
 
 from pipilgrim import Assembled, AssemblyHolder, PilgrimAssembly, PilgrimConfigurable, PilgrimError
 
-# The README's examples, as written there, so the docs can't drift from the code.
+# The README's examples, adapted to run together: names differ where examples would clash.
 
 
 class Map:
@@ -192,7 +192,8 @@ class TestReadme(unittest.TestCase):
         self.assertIs(AssemblyHolder.shared(QuestAssembly), tavern.assembly)
 
     def test_imported_bindings_inject_through_the_importer(self):
-        self.assertIs(AssemblyHolder.shared(MapAssembly).map(), AssemblyHolder.shared(QuestAssembly).factory_for(Map)())
+        imported = AssemblyHolder.shared(QuestAssembly).factory_for(Map)
+        self.assertIs(AssemblyHolder.shared(MapAssembly).map(), imported())
 
     def test_overriding_one_component(self):
         self.assertEqual("Nowhere", TestQuestAssembly().knight().quest.map.region)

@@ -110,7 +110,7 @@ class QuestAssembly(PilgrimAssembly):
 
 Pilgrim runs every `configure` once each instance in the request has been made, in the order they were made, so
 `self.knight()` returns the knight that holds this squire. A cycle through initializers alone is an error that names
-the cycle:
+the cycle, if any component in it is `shared`, `weak_shared` or `object_graph`:
 
 ```
 PilgrimError: Circular dependency in initializers: shared(QuestAssembly.knight) -> shared(QuestAssembly.squire)
@@ -230,8 +230,8 @@ you can write your own and call them the same way.
 
 Resolving is thread-safe. One thread at a time builds a graph from an assembly, and a `shared` component is made
 once however many threads ask for it at once. A `shared` or `weak_shared` component that already exists is returned
-without taking the lock. Each assembly has its own lock, so two assemblies shouldn't call into each other: two
-threads could each hold one lock and wait for the other.
+without taking the lock. Each assembly has its own lock, so one assembly may call into another, as `QuestAssembly`
+calls `MapAssembly` above, but not back: two threads could each hold one lock and wait for the other.
 
 Factories are plain functions, so a resolve never awaits and asyncio tasks can't interleave inside one. Make
 components that need async set-up, such as a connection pool, in the assembly, and open them at start-up:
@@ -245,7 +245,8 @@ await assembly.database().connect()
 
 A lifecycle names the component by the method that called it, read from the caller's frame, along with that
 method's arguments. So call the lifecycle directly from the assembly method, as every example here does, and not
-from a helper that the method calls: the helper's name would be used instead.
+from a helper that the method calls: the helper's name would be used instead. And leave the arguments as they were
+passed until then, since their values at that point are what name the instance.
 
 Reading the frame costs well under a microsecond, where `inspect.stack()` reads every frame and its source file.
 Resolving a `shared` component that already exists takes about 0.3 µs, and making an `unshared` one about 1 µs, on

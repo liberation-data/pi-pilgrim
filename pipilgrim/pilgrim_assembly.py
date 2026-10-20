@@ -48,7 +48,7 @@ class PilgrimAssembly:
         # shared ones once the request is done, so none of them gets an instance whose configure hasn't run yet.
         self._made: Dict[_Key, Any] = {}
         self._instance_stack: List[_Key] = []
-        self._configure_stack: List[Callable[[], None]] = []
+        self._pending_configures: List[Callable[[], None]] = []
         self._request_depth = 0
         self._lock = threading.RLock()
         self._bind_self()
@@ -172,13 +172,14 @@ class PilgrimAssembly:
         a request that catches the failure carries on. The outermost call publishes the request's instances.
         """
         key = (lifecycle, name)
-        # An unshared method may recurse into itself, and its arguments may not compare cleanly, so it isn't checked.
+        # An unshared method may call itself for a new instance each time, so it isn't checked for a cycle.
         if lifecycle is not _UNSHARED and key in self._instance_stack:
             path = " -> ".join(_describe(it) for it in self._instance_stack + [key])
             raise PilgrimError(f"Circular dependency in initializers: {path}. Break it with configure=.")
 
         made_mark = len(self._made)
-        configures = self._configure_stack
+        # Held here, since a configure that runs below swaps the queue for a new one.
+        configures = self._pending_configures
         configure_mark = len(configures)
         self._request_depth += 1
         try:
@@ -225,10 +226,10 @@ class PilgrimAssembly:
         """
         Every instance in the graph has been made, so each may finish its set-up, in the order they were made:
         `configure=` first, then `PilgrimConfigurable.configure`. A configure may resolve more components, which
-        start a configure stack of their own.
+        queue configures of their own.
         """
-        delayed = self._configure_stack
-        self._configure_stack = []
+        delayed = self._pending_configures
+        self._pending_configures = []
         for it in delayed:
             it()
 
@@ -258,19 +259,27 @@ def _caller_name(frame: types.FrameType) -> Hashable:
     """
     Names a component by the assembly method that makes it, and that method's arguments, if it has any. Reading the
     caller's frame costs well under a microsecond, where inspect.stack() reads every frame and its source.
+
+    The arguments are read as they are when the lifecycle is called, so the method mustn't rebind them before then.
     """
     code = frame.f_code
     count = code.co_argcount + code.co_kwonlyargcount
-    if count <= 1 and not code.co_flags & _STAR_ARGUMENTS:
+    flags = code.co_flags
+    if count <= 1 and not flags & _STAR_ARGUMENTS:
         return code.co_qualname
-    star_args = code.co_flags & inspect.CO_VARARGS
-    star_kwargs = code.co_flags & inspect.CO_VARKEYWORDS
+    star_args = bool(flags & inspect.CO_VARARGS)
     values = frame.f_locals
-    arguments = tuple(values[it] for it in code.co_varnames[1:count])
-    if star_args:
-        arguments += tuple(values[code.co_varnames[count]])
-    if star_kwargs:
-        arguments += (tuple(sorted(values[code.co_varnames[count + 1 if star_args else count]].items())),)
+    try:
+        arguments = tuple(values[it] for it in code.co_varnames[1:count])
+        if star_args:
+            arguments += tuple(values[code.co_varnames[count]])
+        if flags & inspect.CO_VARKEYWORDS:
+            arguments += (tuple(sorted(values[code.co_varnames[count + star_args]].items())),)
+    except (KeyError, NameError):
+        raise PilgrimError(
+            f"{code.co_qualname} deleted one of its arguments, which name its instance. Leave them as they were "
+            f"passed until the lifecycle is called."
+        ) from None
     try:
         hash(arguments)
     except TypeError:

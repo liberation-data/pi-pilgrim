@@ -29,6 +29,9 @@ class AssemblyHolder:
 
     @classmethod
     def shared(cls, assembly_type: Optional[Type[PilgrimAssembly]] = None) -> PilgrimAssembly:
+        """
+        The application's one instance of an assembly class, or of `default_assembly_type`, made on first use.
+        """
         wanted = assembly_type or cls.default_assembly_type
         if wanted is None:
             raise PilgrimError(
@@ -108,7 +111,7 @@ class _Assembled:
             annotation = _annotations(it).get(self.name)
             if annotation is not None:
                 try:
-                    return _evaluate(annotation, it)
+                    return _binding_type(annotation, it, self.name)
                 except NameError as e:
                     raise PilgrimError(
                         f"{self.owner.__name__}.{self.name} is annotated with {e.name}, which can't be found when "
@@ -142,19 +145,14 @@ def _annotations(owner: type) -> Dict[str, Any]:
     return typing.cast(Dict[str, Any], owner.__dict__.get("__annotations__", {}))
 
 
-def _evaluate(annotation: Any, owner: type) -> Any:
+def _binding_type(annotation: Any, owner: type, name: str) -> Any:
     """
-    Resolves a string or forward reference against the module and class it was written in. A quoted annotation
-    under `from __future__ import annotations` is a string of a string, so it takes two goes.
+    Resolves one annotation as `typing.get_type_hints` would, against the module and class it was written in:
+    strings and forward references, nested ones included, and `Annotated` metadata dropped.
     """
-    if sys.version_info >= (3, 14):
-        import annotationlib
-
-        if isinstance(annotation, annotationlib.ForwardRef):
-            annotation = annotation.evaluate(owner=owner)
-    while isinstance(annotation, str):
-        annotation = eval(annotation, vars(sys.modules[owner.__module__]), dict(vars(owner)))
-    return annotation
+    alone = type(owner.__name__, (), {"__annotations__": {name: annotation}, "__module__": owner.__module__})
+    hints = typing.get_type_hints(alone, vars(sys.modules[owner.__module__]), dict(vars(owner)))
+    return hints[name]
 
 
 def _type_name(key: Any) -> str:

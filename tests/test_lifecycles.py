@@ -5,6 +5,7 @@ import unittest
 import weakref
 
 from pipilgrim import PilgrimAssembly, PilgrimConfigurable, PilgrimError
+from tests.utils.threads import run_in_threads
 
 
 class Engine:
@@ -49,6 +50,7 @@ class GarageAssembly(PilgrimAssembly):
     def __init__(self):
         self.configuring = threading.Event()
         self.log = []
+        self.links = 3
         super().__init__()
 
     def engine(self):
@@ -90,7 +92,7 @@ class GarageAssembly(PilgrimAssembly):
     def car(self):
         return self.unshared(lambda: Car(self.engine()))
 
-    def horse_pair(self):
+    def spare_pair(self):
         def make():
             first = self.spare()
             self.configuring.set()
@@ -131,6 +133,10 @@ class GarageAssembly(PilgrimAssembly):
     def nested(self, items):
         return self.unshared(lambda: [items] + (self.nested(items[1:]) if items else []))
 
+    def renamed(self, size):
+        del size
+        return self.shared(lambda: Engine())
+
     def clauses(self, clause, more):
         return self.unshared(lambda: [clause] + (self.clauses(more, None) if more is not None else []))
 
@@ -160,7 +166,6 @@ class GarageAssembly(PilgrimAssembly):
             return Engine()
 
         return self.shared(make)
-
 
     def logged(self):
         return self.shared(lambda: Engine(), configure=lambda engine: self.log.append("logged configured"))
@@ -253,6 +258,10 @@ class TestLifecycles(unittest.TestCase):
         with self.assertRaisesRegex(PilgrimError, "can't be hashed"):
             self.assembly.engines([1])
 
+    def test_a_deleted_argument_says_so(self):
+        with self.assertRaisesRegex(PilgrimError, "GarageAssembly.renamed deleted one of its arguments"):
+            self.assembly.renamed(1)
+
     def test_unshared_takes_unhashable_arguments(self):
         self.assertEqual([1], self.assembly.any_engine([1]).size)
 
@@ -300,7 +309,8 @@ class TestLifecycles(unittest.TestCase):
         self.assertIs(car, car.engine.car)
 
     def test_circular_initializers_name_the_cycle(self):
-        with self.assertRaisesRegex(PilgrimError, r"shared\(GarageAssembly.chicken\) -> shared\(GarageAssembly.egg\)"):
+        cycle = r"shared\(GarageAssembly.chicken\) -> shared\(GarageAssembly.egg\)"
+        with self.assertRaisesRegex(PilgrimError, cycle):
             self.assembly.chicken()
 
     def test_a_cycle_names_the_arguments(self):
@@ -311,7 +321,6 @@ class TestLifecycles(unittest.TestCase):
     def test_unshared_may_recurse_into_itself(self):
         self.assertEqual([2, 1, 0], self.assembly.countdown(2))
         self.assertEqual([[1, 2], [2], []], self.assembly.nested([1, 2]))
-        self.assembly.links = 3
         self.assertEqual([2, 1, 0], self.assembly.chain())
 
     def test_unshared_never_compares_its_arguments(self):
@@ -360,7 +369,7 @@ class TestLifecycles(unittest.TestCase):
         engine = self.assembly.tolerant()
         self.assertEqual(["fails_after_logged failed", "badly_configured_inner failed"], self.assembly.log)
         self.assertEqual([engine], list(self.assembly._shared.values()))
-        self.assertEqual([], self.assembly._configure_stack)
+        self.assertEqual([], self.assembly._pending_configures)
         self.assembly.engine()
         self.assertEqual(["fails_after_logged failed", "badly_configured_inner failed"], self.assembly.log)
 
@@ -390,17 +399,13 @@ class TestLifecycles(unittest.TestCase):
             ready.wait()
             seen.append(self.assembly.slow_engine())
 
-        threads = [threading.Thread(target=resolve) for _ in range(8)]
-        for it in threads:
-            it.start()
-        for it in threads:
-            it.join()
+        run_in_threads(resolve, 8)
         self.assertEqual(1, Engine.made)
         self.assertTrue(all(it is seen[0] for it in seen))
 
     def test_threads_get_their_own_object_graph(self):
         pair = []
-        first = threading.Thread(target=lambda: pair.extend(self.assembly.horse_pair()))
+        first = threading.Thread(target=lambda: pair.extend(self.assembly.spare_pair()))
         first.start()
         self.assembly.configuring.wait()
         other = self.assembly.spare()
@@ -414,7 +419,7 @@ class TestLifecycles(unittest.TestCase):
         for _ in range(10_000):
             self.assembly.engine()
         each = (time.perf_counter() - started) / 10_000
-        # inspect.stack() took about 200 µs here; reading the frame takes well under 5.
+        # About 0.3 µs on an M2 Max, where inspect.stack() took about 200. The bound leaves room for slow CI.
         self.assertLess(each, 20e-6)
 
 

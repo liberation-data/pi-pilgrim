@@ -9,6 +9,7 @@ from pipilgrim import Assembled, AssemblyHolder, PilgrimAssembly, PilgrimError
 from tests.utils.castle import Castle
 from tests.utils.knight import Knight
 from tests.utils.quest import DamselInDistressQuest, HolyGrailQuest, Quest
+from tests.utils.threads import run_in_threads
 
 if TYPE_CHECKING:
     from decimal import Decimal
@@ -204,6 +205,7 @@ class TestAssembled(unittest.TestCase):
         self.assertIsInstance(Heir().knight, Knight)
 
     def test_resolves_a_nested_class_annotation(self):
+        # Nothing binds Banner, so the error shows the annotation was resolved to the class.
         with self.assertRaisesRegex(PilgrimError, "no binding for Banner"):
             Hall().banner
 
@@ -213,11 +215,7 @@ class TestAssembled(unittest.TestCase):
 
     def test_threads_see_one_value_for_an_object(self):
         steward, seen = Steward(), []
-        threads = [threading.Thread(target=lambda: seen.append(steward.token)) for _ in range(2)]
-        for it in threads:
-            it.start()
-        for it in threads:
-            it.join()
+        run_in_threads(lambda: seen.append(steward.token), 2)
         self.assertIs(seen[0], seen[1])
         self.assertIs(seen[0], steward.token)
 
@@ -253,11 +251,7 @@ class TestAssemblyHolder(unittest.TestCase):
             ready.wait()
             AssemblyHolder.shared(SlowAssembly)
 
-        threads = [threading.Thread(target=resolve) for _ in range(8)]
-        for it in threads:
-            it.start()
-        for it in threads:
-            it.join()
+        run_in_threads(resolve, 8)
         self.assertEqual(1, SlowAssembly.made)
 
 
