@@ -45,7 +45,8 @@ class PilgrimAssembly:
         self._shared: Dict[Hashable, Any] = {}
         self._weak_shared: weakref.WeakValueDictionary[Hashable, Any] = weakref.WeakValueDictionary()
         # Shared, weak_shared and object_graph instances made by the request in progress. Other threads see the
-        # shared ones once the request is done, so none of them gets an instance whose configure hasn't run yet.
+        # shared and weak_shared ones once the request is done, so none of them gets an instance whose configure
+        # hasn't run yet.
         self._made: Dict[_Key, Any] = {}
         self._instance_stack: List[_Key] = []
         self._pending_configures: List[Callable[[], None]] = []

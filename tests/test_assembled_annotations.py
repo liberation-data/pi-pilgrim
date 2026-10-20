@@ -1,4 +1,5 @@
 import sys
+import typing  # noqa: F401, for the annotation that names it
 import unittest
 from typing import Annotated, Optional
 
@@ -29,6 +30,15 @@ class ArmyAssembly(PilgrimAssembly):
 
     def retinue(self):
         return self.shared(lambda: Retinue())
+
+
+class Lenient:
+    def __getattr__(self, name):
+        return "from __getattr__"
+
+
+class Muster(Lenient):
+    knight: "typing.Nope" = Assembled(assembly=ArmyAssembly)  # noqa: F821
 
 
 class Camp:
@@ -62,12 +72,28 @@ class TestAssembledAnnotations(unittest.TestCase):
 
         self.assertIsInstance(Sentry().Knight, Knight)
 
-    def test_resolves_a_class_from_a_module_that_isnt_imported(self):
+    def test_doesnt_need_its_module_in_sys_modules(self):
         names = {"__name__": "not_a_module", "Assembled": Assembled, "ArmyAssembly": ArmyAssembly, "Knight": Knight}
         exec("class Tent:\n    knight: Knight = Assembled(assembly=ArmyAssembly)\n", names)
         self.assertIsInstance(names["Tent"]().knight, Knight)
+        # A string annotation there has no module to be resolved in, as with get_type_hints.
+        exec("class Hut:\n    knight: 'Knight' = Assembled(assembly=ArmyAssembly)\n", names)
+        with self.assertRaisesRegex(PilgrimError, "Hut.knight is annotated with Knight, which can't be found"):
+            names["Hut"]().knight
 
-    def test_resolves_a_class_defined_in_a_function(self):
+    def test_an_annotation_that_cant_be_resolved_isnt_left_to_getattr(self):
+        with self.assertRaisesRegex(PilgrimError, r"Muster.knight's annotation 'typing.Nope' can't be resolved"):
+            Muster().knight
+
+    def test_added_after_the_class_is_made_says_so(self):
+        class Gate:
+            pass
+
+        Gate.herald = Assembled(key="herald", assembly=ArmyAssembly)
+        with self.assertRaisesRegex(PilgrimError, "added after the class was made"):
+            Gate().herald
+
+    def test_names_a_class_defined_in_a_function(self):
         class Herald:
             pass
 

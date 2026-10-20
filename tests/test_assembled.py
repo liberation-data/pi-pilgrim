@@ -254,7 +254,7 @@ class TestAssembled(unittest.TestCase):
     def test_a_falsy_key_is_a_key(self):
         self.assertEqual("zero", Zero().motto)
 
-    def test_resolves_a_nested_class_annotation(self):
+    def test_names_a_nested_class_annotation(self):
         # Nothing binds Banner, so the error shows the annotation was resolved to the class.
         with self.assertRaisesRegex(PilgrimError, "no binding for Banner"):
             Hall().banner

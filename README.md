@@ -254,7 +254,8 @@ an Apple M2 Max.
 
 ## Upgrading from 0.1
 
-Assemblies written for 0.1 work unchanged. In 0.2:
+Assemblies written for 0.1 work unchanged, unless they reach into the assembly's internals, such as `bindings`,
+`shared_instances` or `inject`, which are now private. In 0.2:
 
 - Resolving is about 600 times faster, and thread-safe.
 - `weak_shared`, `PilgrimConfigurable`, `Assembled`, `AssemblyHolder` and bindings are new, and a method's

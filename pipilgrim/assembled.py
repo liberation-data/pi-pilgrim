@@ -72,7 +72,8 @@ class _Assembled:
     def __init__(self, key: Optional[Hashable] = None, assembly: Optional[Type[PilgrimAssembly]] = None):
         self.key = key
         self.assembly = assembly
-        self.name = "?"
+        # Set when the class body that assigns it runs.
+        self.name = ""
         self.owner: type = object
         self._resolved_key: Any = None
 
@@ -83,6 +84,11 @@ class _Assembled:
     def __get__(self, instance: Any, owner: Optional[type] = None) -> Any:
         if instance is None:
             return self
+        if not self.name:
+            raise PilgrimError(
+                f"An Assembled attribute of {type(instance).__name__} was added after the class was made, so it has "
+                f"no name. Assign it in the class body."
+            )
         try:
             attributes = instance.__dict__
         except AttributeError:
@@ -116,6 +122,11 @@ class _Assembled:
                     raise PilgrimError(
                         f"{self.owner.__name__}.{self.name} is annotated with {e.name}, which can't be found when "
                         f"it is injected. Import it at run time, or give a key."
+                    ) from None
+                except (AttributeError, SyntaxError) as e:
+                    # Raised as an AttributeError, it would reach the owner's __getattr__, if it has one.
+                    raise PilgrimError(
+                        f"{self.owner.__name__}.{self.name}'s annotation {annotation!r} can't be resolved: {e}."
                     ) from None
         raise PilgrimError(f"{self.owner.__name__}.{self.name} needs a type annotation or a key to be Assembled.")
 
