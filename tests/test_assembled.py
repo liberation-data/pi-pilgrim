@@ -65,6 +65,31 @@ class SlowlyBoundAssembly(PilgrimAssembly):
         return self.unshared(make)
 
 
+class ArmoryBase(PilgrimAssembly):
+    pass
+
+
+class Armory(ArmoryBase):
+    def make_bindings(self):
+        self.import_bindings(ArmoryBase())
+
+
+class Inherited:
+    knight: Knight
+
+
+class Heir(Inherited):
+    knight = Assembled(assembly=KingdomAssembly)
+
+
+class Hall:
+    class Banner:
+        pass
+
+    banner: "Banner" = Assembled(assembly=KingdomAssembly)
+    ledger: Decimal = Assembled(assembly=KingdomAssembly)
+
+
 class RoundTable:
     knight: Knight = Assembled(assembly=KingdomAssembly)
     quest: Quest = Assembled(assembly=KingdomAssembly)
@@ -170,6 +195,22 @@ class TestAssembled(unittest.TestCase):
         self.assertIs(AssemblyHolder.shared(StableAssembly), kingdom.factory_for(StableAssembly)())
         self.assertIs(kingdom, kingdom.factory_for(KingdomAssembly)())
 
+    def test_an_import_doesnt_replace_the_importer(self):
+        armory = Armory()
+        self.assertIs(armory, armory.factory_for(ArmoryBase)())
+        self.assertIsNone(armory.factory_for(PilgrimAssembly))
+
+    def test_reads_an_annotation_from_a_base_class(self):
+        self.assertIsInstance(Heir().knight, Knight)
+
+    def test_resolves_a_nested_class_annotation(self):
+        with self.assertRaisesRegex(PilgrimError, "no binding for Banner"):
+            Hall().banner
+
+    def test_an_annotation_that_cant_be_found_says_so(self):
+        with self.assertRaisesRegex(PilgrimError, "Hall.ledger is annotated with Decimal, which can't be found"):
+            Hall().ledger
+
     def test_threads_see_one_value_for_an_object(self):
         steward, seen = Steward(), []
         threads = [threading.Thread(target=lambda: seen.append(steward.token)) for _ in range(2)]
@@ -206,7 +247,13 @@ class TestAssemblyHolder(unittest.TestCase):
         self.assertIsNot(first, AssemblyHolder.shared(KingdomAssembly))
 
     def test_makes_one_across_threads(self):
-        threads = [threading.Thread(target=lambda: AssemblyHolder.shared(SlowAssembly)) for _ in range(8)]
+        ready = threading.Barrier(8)
+
+        def resolve():
+            ready.wait()
+            AssemblyHolder.shared(SlowAssembly)
+
+        threads = [threading.Thread(target=resolve) for _ in range(8)]
         for it in threads:
             it.start()
         for it in threads:

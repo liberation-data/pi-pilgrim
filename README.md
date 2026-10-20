@@ -4,7 +4,7 @@
 [Typhoon](https://github.com/appsquickly/typhoon).
 
 - **Plain Python.** An assembly is a class, and each component is a method that says how to make it. No decorators
-  on your classes, no container configuration, no string lookups, nothing generated.
+  on your classes, no container configuration, no string lookups unless you choose a key, nothing generated.
 - **A composition root.** The key actors in your application, and how they're wired together, are written down in
   one place, as code your IDE can follow and refactor.
 - **Lifecycles:** `shared`, `weak_shared`, `object_graph` (Typhoon's idea: one instance for each graph that's
@@ -108,8 +108,9 @@ class QuestAssembly(PilgrimAssembly):
         )
 ```
 
-Pilgrim runs every `configure` once each instance in the request has been made, so `self.knight()` returns the
-knight that holds this squire. A cycle through initializers alone, whatever the lifecycles, is an error that names the cycle:
+Pilgrim runs every `configure` once each instance in the request has been made, in the order they were made, so
+`self.knight()` returns the knight that holds this squire. A cycle through initializers alone is an error that names
+the cycle:
 
 ```
 PilgrimError: Circular dependency in initializers: shared(QuestAssembly.knight) -> shared(QuestAssembly.squire)
@@ -227,9 +228,10 @@ you can write your own and call them the same way.
 
 ## Threads and asyncio
 
-Resolving is thread-safe. One thread builds a graph at a time, and a `shared` component is made once however many
-threads ask for it at once. A `shared` or `weak_shared` component that already exists is returned without taking
-the lock.
+Resolving is thread-safe. One thread at a time builds a graph from an assembly, and a `shared` component is made
+once however many threads ask for it at once. A `shared` or `weak_shared` component that already exists is returned
+without taking the lock. Each assembly has its own lock, so two assemblies shouldn't call into each other: two
+threads could each hold one lock and wait for the other.
 
 Factories are plain functions, so a resolve never awaits and asyncio tasks can't interleave inside one. Make
 components that need async set-up, such as a connection pool, in the assembly, and open them at start-up:

@@ -43,13 +43,13 @@ class PilgrimAssembly:
     def __init__(self) -> None:
         self._bindings: Dict[Any, Callable[[], Any]] = {}
         self._shared: Dict[Hashable, Any] = {}
-        self._weak_shared: "weakref.WeakValueDictionary[Hashable, Any]" = weakref.WeakValueDictionary()
+        self._weak_shared: weakref.WeakValueDictionary[Hashable, Any] = weakref.WeakValueDictionary()
         # Shared, weak_shared and object_graph instances made by the request in progress. Other threads see the
         # shared ones once the request is done, so none of them gets an instance whose configure hasn't run yet.
-        self._made: Dict[Tuple[PilgrimAssembly.Lifecycle, Hashable], Any] = {}
-        self._instance_stack: List[Tuple[PilgrimAssembly.Lifecycle, Hashable]] = []
+        self._made: Dict[_Key, Any] = {}
+        self._instance_stack: List[_Key] = []
         self._configure_stack: List[Callable[[], None]] = []
-        self._depth = 0
+        self._request_depth = 0
         self._lock = threading.RLock()
         self._bind_self()
         self.make_bindings()
@@ -88,7 +88,8 @@ class PilgrimAssembly:
         """
         A new instance every time it is asked for.
         """
-        name = _caller_name(sys._getframe(1), strict=False)
+        # Nothing is kept under this name, so the arguments needn't be part of it.
+        name = sys._getframe(1).f_code.co_qualname
         with self._lock:
             return self._inject(_UNSHARED, name, factory, configure)
 
@@ -140,6 +141,9 @@ class PilgrimAssembly:
         factory: Callable[[], T],
         configure: Optional[Callable[[T], None]],
     ) -> T:
+        """
+        Looks again under the lock, since another thread may have published the instance while this one waited.
+        """
         with self._lock:
             instance = self._made.get((lifecycle, name), _MISSING)
             if instance is _MISSING:
@@ -168,14 +172,15 @@ class PilgrimAssembly:
         a request that catches the failure carries on. The outermost call publishes the request's instances.
         """
         key = (lifecycle, name)
-        if key in self._instance_stack:
+        # An unshared method may recurse into itself, and its arguments may not compare cleanly, so it isn't checked.
+        if lifecycle is not _UNSHARED and key in self._instance_stack:
             path = " -> ".join(_describe(it) for it in self._instance_stack + [key])
             raise PilgrimError(f"Circular dependency in initializers: {path}. Break it with configure=.")
 
         made_mark = len(self._made)
         configures = self._configure_stack
         configure_mark = len(configures)
-        self._depth += 1
+        self._request_depth += 1
         try:
             instance = self._make(key, factory)
             if lifecycle is not _UNSHARED:
@@ -184,22 +189,23 @@ class PilgrimAssembly:
                 configures.append(lambda: configure(instance))
             if isinstance(instance, PilgrimConfigurable):
                 configures.append(lambda: instance.configure(self))
+            # The graph is built once nothing is being made, though a configure may still be resolving more.
             if not self._instance_stack:
                 self._configure_graph()
         except BaseException:
             for it in list(self._made)[made_mark:]:
                 del self._made[it]
             del configures[configure_mark:]
-            self._configure_stack = configures
             raise
         finally:
-            self._depth -= 1
+            self._request_depth -= 1
 
-        if self._depth == 0:
+        # The request is done once the call that began it returns, configures included.
+        if self._request_depth == 0:
             self._publish()
         return instance
 
-    def _make(self, key: Tuple["PilgrimAssembly.Lifecycle", Hashable], factory: Callable[[], T]) -> T:
+    def _make(self, key: "_Key", factory: Callable[[], T]) -> T:
         self._instance_stack.append(key)
         try:
             instance = factory()
@@ -217,8 +223,9 @@ class PilgrimAssembly:
 
     def _configure_graph(self) -> None:
         """
-        Every instance in the graph has been made, so each may finish its set-up. A configure may resolve more
-        components, which start a configure stack of their own.
+        Every instance in the graph has been made, so each may finish its set-up, in the order they were made:
+        `configure=` first, then `PilgrimConfigurable.configure`. A configure may resolve more components, which
+        start a configure stack of their own.
         """
         delayed = self._configure_stack
         self._configure_stack = []
@@ -241,17 +248,16 @@ _SHARED = PilgrimAssembly.Lifecycle.SHARED
 _WEAK_SHARED = PilgrimAssembly.Lifecycle.WEAK_SHARED
 _OBJECT_GRAPH = PilgrimAssembly.Lifecycle.OBJECT_GRAPH
 _UNSHARED = PilgrimAssembly.Lifecycle.UNSHARED
+_Key = Tuple[PilgrimAssembly.Lifecycle, Hashable]
 
 _MISSING: Any = object()
 _STAR_ARGUMENTS = inspect.CO_VARARGS | inspect.CO_VARKEYWORDS
 
 
-def _caller_name(frame: types.FrameType, strict: bool = True) -> Hashable:
+def _caller_name(frame: types.FrameType) -> Hashable:
     """
     Names a component by the assembly method that makes it, and that method's arguments, if it has any. Reading the
     caller's frame costs well under a microsecond, where inspect.stack() reads every frame and its source.
-
-    Unhashable arguments can't name an instance: an error, unless not `strict`, when the name is unique to the call.
     """
     code = frame.f_code
     count = code.co_argcount + code.co_kwonlyargcount
@@ -268,8 +274,6 @@ def _caller_name(frame: types.FrameType, strict: bool = True) -> Hashable:
     try:
         hash(arguments)
     except TypeError:
-        if not strict:
-            return code.co_qualname, object()
         raise PilgrimError(
             f"{code.co_qualname} was called with an argument that can't be hashed, so it can't name an instance. "
             f"Use unshared, or pass hashable arguments."
@@ -277,10 +281,10 @@ def _caller_name(frame: types.FrameType, strict: bool = True) -> Hashable:
     return code.co_qualname, arguments
 
 
-def _describe(key: Tuple[PilgrimAssembly.Lifecycle, Hashable]) -> str:
+def _describe(key: _Key) -> str:
     lifecycle, name = key
     if isinstance(name, tuple):
-        name = f"{name[0]}{name[1]!r}"
+        name = f"{name[0]}({', '.join(map(repr, name[1]))})"
     return f"{lifecycle.value}({name})"
 
 

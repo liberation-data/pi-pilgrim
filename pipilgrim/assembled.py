@@ -97,7 +97,7 @@ class _Assembled:
         factory = assembly.factory_for(self._resolved_key)
         if factory is None:
             raise PilgrimError(
-                f"{type(assembly).__name__} has no binding for {_describe(self._resolved_key)}, needed by "
+                f"{type(assembly).__name__} has no binding for {_type_name(self._resolved_key)}, needed by "
                 f"{self.owner.__name__}.{self.name}. Declare it in make_bindings with make_injectable."
             )
         return factory()
@@ -107,15 +107,23 @@ class _Assembled:
         for it in self.owner.__mro__:
             annotation = _annotations(it).get(self.name)
             if annotation is not None:
-                if isinstance(annotation, str):
-                    annotation = eval(annotation, vars(sys.modules[it.__module__]), dict(vars(it)))
-                return annotation
+                try:
+                    return _evaluate(annotation, it)
+                except NameError as e:
+                    raise PilgrimError(
+                        f"{self.owner.__name__}.{self.name} is annotated with {e.name}, which can't be found when "
+                        f"it is injected. Import it at run time, or give a key."
+                    ) from None
         raise PilgrimError(f"{self.owner.__name__}.{self.name} needs a type annotation or a key to be Assembled.")
 
 
 if TYPE_CHECKING:
-    # So `knight: Knight = Assembled()` type-checks, as `dataclasses.field()` does.
-    def Assembled(key: Optional[Hashable] = None, assembly: Optional[Type[PilgrimAssembly]] = None) -> Any: ...
+    # So `knight: Knight = Assembled()` type-checks, as `dataclasses.field()` does. The class stays outside this
+    # block, where type checkers still check it.
+    def Assembled(key: Optional[Hashable] = None, assembly: Optional[Type[PilgrimAssembly]] = None) -> Any:
+        """
+        An attribute injected from an assembly, on first access, by its annotated type or by key.
+        """
 
 else:
     Assembled = _Assembled
@@ -124,15 +132,30 @@ else:
 
 def _annotations(owner: type) -> Dict[str, Any]:
     """
-    The class's own annotations, unevaluated where they can be, so that one that can't be resolved, such as a type
-    imported only under TYPE_CHECKING, doesn't stop the others.
+    The class's own annotations, left unresolved where they can't be resolved, so that one that can't, such as a
+    type imported only under TYPE_CHECKING, doesn't stop the others.
     """
     if sys.version_info >= (3, 14):
         import annotationlib
 
-        return annotationlib.get_annotations(owner, format=annotationlib.Format.STRING)
+        return annotationlib.get_annotations(owner, format=annotationlib.Format.FORWARDREF)
     return typing.cast(Dict[str, Any], owner.__dict__.get("__annotations__", {}))
 
 
-def _describe(key: Any) -> str:
+def _evaluate(annotation: Any, owner: type) -> Any:
+    """
+    Resolves a string or forward reference against the module and class it was written in. A quoted annotation
+    under `from __future__ import annotations` is a string of a string, so it takes two goes.
+    """
+    if sys.version_info >= (3, 14):
+        import annotationlib
+
+        if isinstance(annotation, annotationlib.ForwardRef):
+            annotation = annotation.evaluate(owner=owner)
+    while isinstance(annotation, str):
+        annotation = eval(annotation, vars(sys.modules[owner.__module__]), dict(vars(owner)))
+    return annotation
+
+
+def _type_name(key: Any) -> str:
     return key.__name__ if isinstance(key, type) else repr(key)

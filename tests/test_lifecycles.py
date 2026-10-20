@@ -21,6 +21,20 @@ class EmptyBag:
         return 0
 
 
+class Clause:
+    """
+    Like an SQL expression: hashable, but == doesn't give a bool.
+    """
+
+    def __eq__(self, other):
+        return self
+
+    def __bool__(self):
+        raise TypeError("a clause has no truth value")
+
+    __hash__ = object.__hash__
+
+
 class Car(PilgrimConfigurable):
     def __init__(self, engine):
         self.engine = engine
@@ -107,8 +121,18 @@ class GarageAssembly(PilgrimAssembly):
     def countdown(self, size):
         return self.unshared(lambda: [size] + (self.countdown(size - 1) if size else []))
 
-    def runaway(self):
-        return self.unshared(lambda: self.runaway())
+    def chain(self):
+        def make():
+            self.links -= 1
+            return [self.links] + (self.chain() if self.links else [])
+
+        return self.unshared(make)
+
+    def nested(self, items):
+        return self.unshared(lambda: [items] + (self.nested(items[1:]) if items else []))
+
+    def clauses(self, clause, more):
+        return self.unshared(lambda: [clause] + (self.clauses(more, None) if more is not None else []))
 
     def broken(self):
         return self.object_graph(lambda: 1 / 0)
@@ -148,6 +172,33 @@ class GarageAssembly(PilgrimAssembly):
 
         return self.shared(make)
 
+    def keeps_logged(self):
+        def make():
+            self.logged()
+            try:
+                self.broken()
+            except ZeroDivisionError:
+                pass
+            return Engine()
+
+        return self.shared(make)
+
+    def interrupted(self):
+        def make():
+            self.engine()
+            raise KeyboardInterrupt
+
+        return self.shared(make)
+
+    def first_logged(self):
+        return self.shared(lambda: Engine(), configure=lambda engine: self.log.append("first"))
+
+    def second_logged(self):
+        return self.shared(lambda: OrderedCar(self.log), configure=lambda car: self.log.append("configure="))
+
+    def ordered(self):
+        return self.unshared(lambda: (self.first_logged(), self.second_logged()))
+
     def badly_configured_inner(self):
         return self.shared(lambda: Engine("inner"), configure=lambda engine: 1 / 0)
 
@@ -163,6 +214,14 @@ class GarageAssembly(PilgrimAssembly):
 
     def broken_after_spare(self):
         return self.unshared(lambda: (self.spare(), self.broken()))
+
+
+class OrderedCar(PilgrimConfigurable):
+    def __init__(self, log):
+        self.log = log
+
+    def configure(self, assembly):
+        self.log.append("configurable")
 
 
 class SportsGarageAssembly(GarageAssembly):
@@ -221,9 +280,10 @@ class TestLifecycles(unittest.TestCase):
         gc.collect()
         self.assertEqual(0, len(self.assembly._weak_shared))
 
-    def test_weak_shared_is_shared_within_a_graph_even_when_falsy(self):
+    def test_weak_shared_is_shared_even_when_falsy(self):
         first, second = self.assembly.two_bags()
         self.assertIs(first, second)
+        self.assertIs(first, self.assembly.weak_bag())
 
     def test_weak_shared_refuses_what_cant_be_weakly_referenced(self):
         with self.assertRaises(PilgrimError) as caught:
@@ -244,15 +304,19 @@ class TestLifecycles(unittest.TestCase):
             self.assembly.chicken()
 
     def test_a_cycle_names_the_arguments(self):
-        with self.assertRaisesRegex(PilgrimError, r"shared\(GarageAssembly.loop\(1,\)\) -> shared\(GarageAssembly.loop"):
+        cycle = r"shared\(GarageAssembly.loop\(1\)\) -> shared\(GarageAssembly.loop\(1\)\)\."
+        with self.assertRaisesRegex(PilgrimError, cycle):
             self.assembly.loop(1)
 
-    def test_an_unshared_cycle_is_named(self):
-        with self.assertRaisesRegex(PilgrimError, r"unshared\(GarageAssembly.runaway\) -> unshared\(GarageAssembly.runaway\)"):
-            self.assembly.runaway()
-
-    def test_unshared_may_recurse_with_other_arguments(self):
+    def test_unshared_may_recurse_into_itself(self):
         self.assertEqual([2, 1, 0], self.assembly.countdown(2))
+        self.assertEqual([[1, 2], [2], []], self.assembly.nested([1, 2]))
+        self.assembly.links = 3
+        self.assertEqual([2, 1, 0], self.assembly.chain())
+
+    def test_unshared_never_compares_its_arguments(self):
+        first, second = Clause(), Clause()
+        self.assertEqual([first, second], self.assembly.clauses(first, second))
 
     def test_a_failed_request_leaves_the_assembly_usable(self):
         with self.assertRaises(ZeroDivisionError):
@@ -272,6 +336,20 @@ class TestLifecycles(unittest.TestCase):
             self.assembly.badly_configured()
         self.assertEqual({}, self.assembly._shared)
         self.assertIs(self.assembly.engine(), self.assembly.engine())
+
+    def test_a_failure_caught_in_a_factory_keeps_what_came_before(self):
+        self.assembly.keeps_logged()
+        self.assertEqual(["logged configured"], self.assembly.log)
+
+    def test_an_interrupted_request_keeps_nothing(self):
+        with self.assertRaises(KeyboardInterrupt):
+            self.assembly.interrupted()
+        self.assertEqual({}, self.assembly._made)
+        self.assertEqual({}, self.assembly._shared)
+
+    def test_configures_run_in_the_order_instances_were_made(self):
+        self.assembly.ordered()
+        self.assertEqual(["first", "configure=", "configurable"], self.assembly.log)
 
     def test_a_failed_request_leaks_no_object_graph_instance(self):
         with self.assertRaises(ZeroDivisionError):
@@ -306,8 +384,13 @@ class TestLifecycles(unittest.TestCase):
         self.assertIsInstance(engine, Engine)
 
     def test_shared_is_made_once_across_threads(self):
-        seen = []
-        threads = [threading.Thread(target=lambda: seen.append(self.assembly.slow_engine())) for _ in range(8)]
+        seen, ready = [], threading.Barrier(8)
+
+        def resolve():
+            ready.wait()
+            seen.append(self.assembly.slow_engine())
+
+        threads = [threading.Thread(target=resolve) for _ in range(8)]
         for it in threads:
             it.start()
         for it in threads:
