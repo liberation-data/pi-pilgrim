@@ -89,6 +89,7 @@ assembly.kingdom("Wessex")            # the same Kingdom on every call with "Wes
 ```
 
 A `shared`, `weak_shared` or `object_graph` component's arguments must be hashable. An `unshared` one's needn't be.
+Arguments that are equal name the same instance, so `kingdom(1)` and `kingdom(1.0)` are one kingdom.
 
 ## Circular dependencies
 
@@ -108,7 +109,7 @@ class QuestAssembly(PilgrimAssembly):
 ```
 
 Pilgrim runs every `configure` once each instance in the request has been made, so `self.knight()` returns the
-knight that holds this squire. A cycle through initializers alone is an error that names the cycle:
+knight that holds this squire. A cycle through initializers alone, whatever the lifecycles, is an error that names the cycle:
 
 ```
 PilgrimError: Circular dependency in initializers: shared(QuestAssembly.knight) -> shared(QuestAssembly.squire)
@@ -187,13 +188,20 @@ class QuestAssembly(PilgrimAssembly):
 `FileResource` provides the text of a file, relative to a directory:
 
 ```python
-def quest(self) -> Quest:
-    return self.shared(lambda: HolyGrailQuest(
-        description=FileResource(os.path.dirname(__file__), "quest.txt").provide()
-    ))
+import os
+
+from pipilgrim import FileResource
+
+
+class QuestAssembly(PilgrimAssembly):
+    def quest(self) -> Quest:
+        return self.shared(lambda: HolyGrailQuest(
+            description=FileResource(os.path.dirname(__file__), "quest.txt").provide()
+        ))
 ```
 
-Any object with a `provide()` method counts as an `InstanceProvider`, so you can write your own.
+`InstanceProvider` is the protocol for things like this: any object with a `provide()` method counts as one, so
+you can write your own and call them the same way.
 
 ## Testing
 
@@ -206,13 +214,22 @@ Any object with a `provide()` method counts as an `InstanceProvider`, so you can
           return self.shared(lambda: FakeMap())
   ```
 
-  An override can build on the method it replaces with `super().map()`.
+  An override can build on the method it replaces. Take `super().map` before the lambda, since `super()` with no
+  arguments doesn't work inside one:
+
+  ```python
+  class TestQuestAssembly(QuestAssembly):
+      def map(self) -> Map:
+          real = super().map
+          return self.shared(lambda: RecordingMap(real()))
+  ```
 - `AssemblyHolder.reset()` forgets every assembly and the default, so each test can start clean.
 
 ## Threads and asyncio
 
 Resolving is thread-safe. One thread builds a graph at a time, and a `shared` component is made once however many
-threads ask for it at once. A `shared` component that already exists is returned without taking the lock.
+threads ask for it at once. A `shared` or `weak_shared` component that already exists is returned without taking
+the lock.
 
 Factories are plain functions, so a resolve never awaits and asyncio tasks can't interleave inside one. Make
 components that need async set-up, such as a connection pool, in the assembly, and open them at start-up:
@@ -238,7 +255,7 @@ Assemblies written for 0.1 work unchanged. In 0.2:
 
 - Resolving is about 600 times faster, and thread-safe.
 - `weak_shared`, `PilgrimConfigurable`, `Assembled`, `AssemblyHolder` and bindings are new, and a method's
-  arguments now name its instance.
+  arguments, `*args` and `**kwargs` included, now name its instance.
 - Errors are `PilgrimError`, and a circular dependency names the cycle.
 - A component is named by its method's qualified name, so an override no longer clashes with the method it
   overrides.

@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import threading
+import time
 import unittest
-from typing import Optional
+from typing import TYPE_CHECKING, Optional, Union
 
 from pipilgrim import Assembled, AssemblyHolder, PilgrimAssembly, PilgrimError
 from tests.utils.castle import Castle
 from tests.utils.knight import Knight
 from tests.utils.quest import DamselInDistressQuest, HolyGrailQuest, Quest
+
+if TYPE_CHECKING:
+    from decimal import Decimal
 
 
 class StableAssembly(PilgrimAssembly):
@@ -35,6 +40,31 @@ class KingdomAssembly(PilgrimAssembly):
         return self.shared(lambda: Castle(name="Camelot", foo="bar"))
 
 
+class TestKingdomAssembly(KingdomAssembly):
+    pass
+
+
+class SlowAssembly(PilgrimAssembly):
+    made = 0
+
+    def __init__(self):
+        time.sleep(0.05)
+        SlowAssembly.made += 1
+        super().__init__()
+
+
+class SlowlyBoundAssembly(PilgrimAssembly):
+    def make_bindings(self):
+        self.make_injectable(self.token, by_key="token")
+
+    def token(self):
+        def make():
+            time.sleep(0.05)
+            return object()
+
+        return self.unshared(make)
+
+
 class RoundTable:
     knight: Knight = Assembled(assembly=KingdomAssembly)
     quest: Quest = Assembled(assembly=KingdomAssembly)
@@ -43,6 +73,9 @@ class RoundTable:
     damsel: DamselInDistressQuest = Assembled(assembly=KingdomAssembly)
     kingdom: KingdomAssembly = Assembled(assembly=KingdomAssembly)
     later: Squire = Assembled(assembly=KingdomAssembly)
+    keep: Castle | None = Assembled(assembly=KingdomAssembly)
+    nowhere = Assembled(key="nowhere", assembly=KingdomAssembly)
+    price: Decimal
 
 
 class Tavern:
@@ -52,6 +85,16 @@ class Tavern:
 
 class Squire:
     pass
+
+
+class Steward:
+    kingdom: KingdomAssembly = Assembled()
+    token = Assembled(key="token", assembly=SlowlyBoundAssembly)
+
+
+class Page:
+    __slots__ = ()
+    knight: Knight = Assembled(assembly=KingdomAssembly)
 
 
 class TestAssembled(unittest.TestCase):
@@ -102,10 +145,73 @@ class TestAssembled(unittest.TestCase):
 
     def test_make_injectable_takes_one_way_in(self):
         assembly = KingdomAssembly()
-        with self.assertRaises(PilgrimError):
+        with self.assertRaisesRegex(PilgrimError, "one of by_type or by_key"):
             assembly.make_injectable(assembly.knight)
-        with self.assertRaises(PilgrimError):
+        with self.assertRaisesRegex(PilgrimError, "one of by_type or by_key"):
             assembly.make_injectable(assembly.knight, by_type=Knight, by_key="knight")
+
+    def test_union_with_none_injects_as_the_type(self):
+        self.assertEqual("Camelot", RoundTable().keep.name)
+        self.assertIsNone(KingdomAssembly().factory_for(Union[Castle, Knight]))
+
+    def test_an_unresolvable_annotation_elsewhere_doesnt_matter(self):
+        self.assertIsInstance(RoundTable().knight, Knight)
+
+    def test_a_missing_key_names_the_key(self):
+        with self.assertRaisesRegex(PilgrimError, "no binding for 'nowhere', needed by RoundTable.nowhere"):
+            RoundTable().nowhere
+
+    def test_a_subclass_injects_as_the_assembly_it_overrides(self):
+        AssemblyHolder.default_assembly_type = TestKingdomAssembly
+        self.assertIs(AssemblyHolder.shared(TestKingdomAssembly), Steward().kingdom)
+
+    def test_imports_inject_the_imported_assembly_and_keep_the_importer(self):
+        kingdom = KingdomAssembly()
+        self.assertIs(AssemblyHolder.shared(StableAssembly), kingdom.factory_for(StableAssembly)())
+        self.assertIs(kingdom, kingdom.factory_for(KingdomAssembly)())
+
+    def test_threads_see_one_value_for_an_object(self):
+        steward, seen = Steward(), []
+        threads = [threading.Thread(target=lambda: seen.append(steward.token)) for _ in range(2)]
+        for it in threads:
+            it.start()
+        for it in threads:
+            it.join()
+        self.assertIs(seen[0], seen[1])
+        self.assertIs(seen[0], steward.token)
+
+    def test_slots_without_dict_say_so(self):
+        with self.assertRaisesRegex(PilgrimError, "Page has __slots__"):
+            Page().knight
+
+    def test_the_class_attribute_is_the_descriptor(self):
+        self.assertIsInstance(RoundTable.knight, Assembled)
+
+
+class TestAssemblyHolder(unittest.TestCase):
+    def setUp(self):
+        SlowAssembly.made = 0
+        AssemblyHolder.reset()
+
+    def tearDown(self):
+        AssemblyHolder.reset()
+
+    def test_holds_one_of_each_until_reset(self):
+        first = AssemblyHolder.shared(KingdomAssembly)
+        self.assertIs(first, AssemblyHolder.shared(KingdomAssembly))
+        AssemblyHolder.default_assembly_type = KingdomAssembly
+        self.assertIs(first, AssemblyHolder.shared())
+        AssemblyHolder.reset()
+        self.assertIsNone(AssemblyHolder.default_assembly_type)
+        self.assertIsNot(first, AssemblyHolder.shared(KingdomAssembly))
+
+    def test_makes_one_across_threads(self):
+        threads = [threading.Thread(target=lambda: AssemblyHolder.shared(SlowAssembly)) for _ in range(8)]
+        for it in threads:
+            it.start()
+        for it in threads:
+            it.join()
+        self.assertEqual(1, SlowAssembly.made)
 
 
 if __name__ == "__main__":

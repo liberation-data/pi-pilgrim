@@ -121,6 +121,18 @@ class TestQuestAssembly(QuestAssembly):
         return self.shared(lambda: FakeMap())
 
 
+class RecordingMap(Map):
+    def __init__(self, real):
+        super().__init__(real.region)
+        self.real = real
+
+
+class RecordingQuestAssembly(QuestAssembly):
+    def map(self) -> Map:
+        real = super().map
+        return self.shared(lambda: RecordingMap(real()))
+
+
 class Tavern:
     knight: Knight = Assembled()
     quest: HolyGrailQuest = Assembled(key="damsel_quest")
@@ -184,6 +196,13 @@ class TestReadme(unittest.TestCase):
 
     def test_overriding_one_component(self):
         self.assertEqual("Nowhere", TestQuestAssembly().knight().quest.map.region)
+
+    def test_an_override_builds_on_super(self):
+        assembly = RecordingQuestAssembly()
+        recorded = assembly.knight().quest.map
+        self.assertIsInstance(recorded, RecordingMap)
+        self.assertIs(AssemblyHolder.shared(MapAssembly).map(), recorded.real)
+        self.assertIs(recorded, assembly.map())
 
 
 if __name__ == "__main__":
