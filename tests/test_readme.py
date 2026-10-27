@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 
 from pipilgrim import Assembled, AssemblyHolder, PilgrimAssembly, PilgrimConfigurable, PilgrimError
@@ -140,6 +141,62 @@ class Tavern:
     assembly: QuestAssembly = Assembled()
 
 
+class Pool:
+    def __init__(self, url):
+        self.url = url
+        self.log = []
+
+    async def aclose(self):
+        self.log.append("pool")
+
+
+class QuestRepository:
+    def __init__(self, pool):
+        self.pool = pool
+        self.saved = []
+
+    async def save(self, quest):
+        self.saved.append(quest)
+
+    def close(self):
+        self.pool.log.append("repository")
+
+
+class DatabaseAssembly(PilgrimAssembly):
+    def pool(self) -> Pool:
+        return self.shared(lambda: Pool(url="postgresql://localhost/quests"))
+
+    def repository(self) -> QuestRepository:
+        return self.shared(lambda: QuestRepository(self.pool()))
+
+
+class Ledger:
+    def __init__(self):
+        self.log = []
+
+    def open(self):
+        self.log.append("open")
+
+    def flush_and_close(self):
+        self.log.append("flush and close")
+
+
+class Scroll:
+    def __init__(self):
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+class LedgerAssembly(PilgrimAssembly):
+    def ledger(self) -> Ledger:
+        return self.shared(lambda: Ledger(), init=lambda it: it.open(), destroy=lambda it: it.flush_and_close())
+
+    def scroll(self) -> Scroll:
+        return self.shared(lambda: Scroll(), destroy=None)  # closed by someone else
+
+
 class TestReadme(unittest.TestCase):
     def setUp(self):
         AssemblyHolder.reset()
@@ -204,6 +261,36 @@ class TestReadme(unittest.TestCase):
         self.assertIsInstance(recorded, RecordingMap)
         self.assertIs(AssemblyHolder.shared(MapAssembly).map(), recorded.real)
         self.assertIs(recorded, assembly.map())
+
+    def test_closing(self):
+        async def main():
+            async with DatabaseAssembly() as assembly:
+                repository = assembly.repository()
+                await repository.save("grail")
+            return repository
+
+        repository = asyncio.run(main())
+        self.assertEqual(["grail"], repository.saved)
+        self.assertEqual(["repository", "pool"], repository.pool.log)
+
+    def test_init_and_destroy(self):
+        with LedgerAssembly() as assembly:
+            ledger, scroll = assembly.ledger(), assembly.scroll()
+        self.assertEqual(["open", "flush and close"], ledger.log)
+        self.assertFalse(scroll.closed)
+
+    def test_closing_an_assembly_closes_the_one_it_asked_for(self):
+        quests = QuestAssembly()
+        quests.close()
+        with self.assertRaisesRegex(PilgrimError, "MapAssembly is closed"):
+            quests.maps.map()
+        self.assertIsNot(AssemblyHolder.shared(MapAssembly), quests.maps)
+
+    def test_the_holder_closes_what_it_holds(self):
+        AssemblyHolder.default_assembly_type = QuestAssembly
+        Tavern().knight
+        asyncio.run(AssemblyHolder.aclose())
+        self.assertEqual({}, AssemblyHolder._instances)
 
 
 if __name__ == "__main__":
