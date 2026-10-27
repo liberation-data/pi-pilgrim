@@ -1,6 +1,6 @@
 [project]
 name = "pi-pilgrim"
-version = "0.2.0"
+version = "0.3.0"
 description = "Dependency injection for Python: a port of Pilgrim, the successor to Typhoon."
 authors = [{ name = "Jasper Blues", email = "jasper@liberation-data.com" }]
 license = "MIT"

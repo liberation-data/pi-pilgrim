@@ -10,6 +10,8 @@
 - **Lifecycles:** `shared`, `weak_shared`, `object_graph` (Typhoon's idea: one instance for each graph that's
   built) and `unshared`.
 - **Circular dependencies** that are resolved after the graph is built, with `configure=` or `PilgrimConfigurable`.
+- **Closing.** An assembly closes the components it holds when it stops, newest first, as Spring closes its
+  singletons: `with`, `async with`, `close()` or `await aclose()`.
 - **Runtime arguments.** An assembly method can take arguments, so it doubles as a factory that mixes the caller's
   values with the components it wires in.
 - **Injection into top-level classes** with `Assembled`, by type or by key.
@@ -126,6 +128,84 @@ class Squire(PilgrimConfigurable):
         self.master = assembly.knight()
 ```
 
+## Closing
+
+An assembly holds its `shared` components, and its `weak_shared` ones while they're alive. Closing it tears them
+down, newest first, so a component is closed before the ones it was made from, as Spring closes its singletons:
+
+```python
+class DatabaseAssembly(PilgrimAssembly):
+    def pool(self) -> Pool:
+        return self.shared(lambda: Pool(url="postgresql://localhost/quests"))
+
+    def repository(self) -> QuestRepository:
+        return self.shared(lambda: QuestRepository(self.pool()))
+
+
+async def main():
+    async with DatabaseAssembly() as assembly:
+        await assembly.repository().save(quest)
+    # The repository, then the pool, are closed here, before the event loop ends.
+```
+
+A component's teardown is the first of these it has, so its class needn't know about Pilgrim:
+
+| closed with | calls |
+|---|---|
+| `await assembly.aclose()`, `async with` | `aclose()`, `close()` or `shutdown()`, and awaits what it returns |
+| `assembly.close()`, `with` | `close()` or `shutdown()` |
+
+`__exit__` isn't called: called without `__enter__`, it releases a lock that isn't held, or runs a `@contextmanager`
+from the start. `object_graph` and `unshared` components aren't held, so closing doesn't close them, as Spring doesn't
+close its prototypes. Nor is a component that's a class.
+
+`destroy=` tears a component down another way, and `destroy=None` leaves it open. `init=` runs as soon as the factory
+returns, before the instance is given to anything that depends on it, where `configure=` waits for the whole graph:
+
+```python
+class QuestAssembly(PilgrimAssembly):
+    def ledger(self) -> Ledger:
+        return self.shared(lambda: Ledger(), init=lambda it: it.open(), destroy=lambda it: it.flush_and_close())
+
+    def scroll(self) -> Scroll:
+        return self.shared(lambda: Scroll(), destroy=None)  # closed by someone else
+```
+
+- **Async teardown.** `close()` can't wait for one, so if any component's teardown is async (`aclose()`, an
+  `async def close()`, or an `async def` destroy), it refuses before closing anything and says to use
+  `await aclose()`. A sync destroy that returns a coroutine is found only when it is called: that component's
+  teardown is reported as an error and the others are closed.
+- **Errors.** A failed teardown doesn't stop the others. Once every component is closed, their errors are raised
+  together as an `ExceptionGroup`, each with a note naming its component.
+- **A failed request** keeps none of the components it made, so closing doesn't close them either. If a request can
+  fail after it makes a pool, say, ask for the pool first, in a request of its own.
+- **Closing twice** does nothing.
+- **After closing,** the assembly makes no more components, and says so. Make a new assembly to start again.
+- **Threads.** A request in progress on another thread finishes, and its components are closed with the rest. One
+  that comes after is refused.
+
+### Nested assemblies
+
+An assembly that asks `AssemblyHolder` for another, which the holder hasn't made yet, owns it, and closes it after its
+own components. That's the case for `QuestAssembly` under [More than one assembly](#more-than-one-assembly), which
+asks for `MapAssembly` in its initializer: closing the quests closes the maps. The holder then forgets the closed
+assembly, so the next `AssemblyHolder.shared(MapAssembly)` makes a new one.
+
+An assembly that something else asked for first, such as an `Assembled` attribute or a component's own `__init__`, is
+owned by the holder.
+`AssemblyHolder.close()`, or `await AssemblyHolder.aclose()`, closes every assembly it holds, newest first, and leaves
+one that another owns to its owner, so each is closed before the ones it asked for:
+
+```python
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield
+    await AssemblyHolder.aclose()
+```
+
+An assembly that's a component of another, made with `self.shared(lambda: MapAssembly())`, is closed like any other
+component.
+
 ## Injecting into top-level classes
 
 Most of your classes are made by the assembly. A few, such as an application's entry point or a web framework's
@@ -238,7 +318,8 @@ you can write your own and call them the same way.
           real = super().map
           return self.shared(lambda: RecordingMap(real()))
   ```
-- `AssemblyHolder.reset()` forgets every assembly and the default, so each test can start clean.
+- `AssemblyHolder.reset()` forgets every assembly and the default, so each test can start clean. It doesn't close
+  them: call `AssemblyHolder.close()` first if they hold resources.
 
 ## Threads and asyncio
 
@@ -253,6 +334,8 @@ components that need async set-up, such as a connection pool, in the assembly, a
 ```python
 assembly = AppAssembly()
 await assembly.database().connect()
+...
+await assembly.aclose()  # closes the database, with its aclose() or close()
 ```
 
 ## How it works
