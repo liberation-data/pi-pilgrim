@@ -26,5 +26,15 @@ jobs:
       # pi-pilgrim has no dependencies, and its tests are unittest's, so they run on the bare interpreter.
       - name: Test
         run: uv run --no-project python -m unittest -v
+      # The package and the release scripts type-check clean, each on the matrix Python: mypy targets the interpreter
+      # it runs on, and pyright is told. The checkers are pinned, so that a new release of one doesn't fail a pull
+      # request that changed nothing; raise the pins on purpose. The tests aren't type-checked.
+      - name: mypy
+        run: uvx mypy==2.4.0 --strict pipilgrim scripts
+      - name: pyright
+        run: uvx pyright==1.1.414 --pythonversion "${{ matrix.python }}" pipilgrim scripts
+      # pyproject.toml is valid for Poetry, and poetry.lock is up to date with it.
+      - name: Poetry check
+        run: uvx poetry==2.5.1 check --lock
       - name: Build
         run: uv build --no-sources
