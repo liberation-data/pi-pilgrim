@@ -1,7 +1,7 @@
 import asyncio
 import unittest
 
-from pipilgrim import Assembled, AssemblyHolder, PilgrimAssembly, PilgrimConfigurable, PilgrimError
+from pipilgrim import Assembled, AssemblyHolder, AsyncPilgrimAssembly, PilgrimAssembly, PilgrimConfigurable, PilgrimError
 
 # The README's examples, adapted to run together: names differ where examples would clash.
 
@@ -146,6 +146,9 @@ class Pool:
         self.url = url
         self.log = []
 
+    async def connect(self):
+        self.log.append("connect")
+
     async def aclose(self):
         self.log.append("pool")
 
@@ -168,6 +171,11 @@ class DatabaseAssembly(PilgrimAssembly):
 
     def repository(self) -> QuestRepository:
         return self.shared(lambda: QuestRepository(self.pool()))
+
+
+class PoolAssembly(AsyncPilgrimAssembly):
+    def pool(self) -> Pool:
+        return self.shared(lambda: Pool(url="postgresql://localhost/quests"))
 
 
 class Ledger:
@@ -272,6 +280,16 @@ class TestReadme(unittest.TestCase):
         repository = asyncio.run(main())
         self.assertEqual(["grail"], repository.saved)
         self.assertEqual(["repository", "pool"], repository.pool.log)
+
+    def test_an_async_assembly_closes_with_await_close(self):
+        async def main():
+            assembly = PoolAssembly()
+            await assembly.pool().connect()
+            pool = assembly.pool()
+            await assembly.close()
+            return pool
+
+        self.assertEqual(["connect", "pool"], asyncio.run(main()).log)
 
     def test_init_and_destroy(self):
         with LedgerAssembly() as assembly:

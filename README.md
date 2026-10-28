@@ -11,7 +11,8 @@
   built) and `unshared`.
 - **Circular dependencies** that are resolved after the graph is built, with `configure=` or `PilgrimConfigurable`.
 - **Closing.** An assembly closes the components it holds when it stops, newest first, as Spring closes its
-  singletons: `with`, `async with`, `close()` or `await aclose()`.
+  singletons: `with`, `async with`, `close()` or `await aclose()`. One whose teardown is async, an
+  `AsyncPilgrimAssembly`, closes with `await close()` too.
 - **Runtime arguments.** An assembly method can take arguments, so it doubles as a factory that mixes the caller's
   values with the components it wires in.
 - **Injection into top-level classes** with `Assembled`, by type or by key.
@@ -172,9 +173,11 @@ class QuestAssembly(PilgrimAssembly):
 ```
 
 - **Async teardown.** `close()` can't wait for one, so if any component's teardown is async (`aclose()`, an
-  `async def close()`, or an `async def` destroy), it refuses before closing anything and says to use
-  `await aclose()`. A sync destroy that returns a coroutine is found only when it is called: that component's
-  teardown is reported as an error and the others are closed.
+  `async def close()`, or an `async def` destroy), it raises `AsyncTeardownRequired` before closing anything and
+  says to use `await aclose()`. A sync destroy that returns a coroutine is found only when it is called: that
+  component's teardown is reported as an `AsyncTeardownRequired` in the `ExceptionGroup`, and the others are closed.
+  `AsyncTeardownRequired` is a `PilgrimError`, so `except PilgrimError` still catches it. An assembly whose
+  teardown is async can say so, with `AsyncPilgrimAssembly`, below.
 - **Errors.** A failed teardown doesn't stop the others. Once every component is closed, their errors are raised
   together as an `ExceptionGroup`, each with a note naming its component.
 - **A failed request** keeps none of the components it made, so closing doesn't close them either. If a request can
@@ -183,6 +186,39 @@ class QuestAssembly(PilgrimAssembly):
 - **After closing,** the assembly makes no more components, and says so. Make a new assembly to start again.
 - **Threads.** A request in progress on another thread finishes, and its components are closed with the rest. One
   that comes after is refused.
+
+### Async assemblies
+
+An assembly that holds something to close asynchronously, such as a database driver's pool, can subclass
+`AsyncPilgrimAssembly`. Its `close()` is `aclose()`, so `await assembly.close()` closes it as `await
+assembly.aclose()` does, and so does `asyncio.run(assembly.close())`, even if nothing async has been made yet:
+
+```python
+class PoolAssembly(AsyncPilgrimAssembly):
+    def pool(self) -> Pool:
+        return self.shared(lambda: Pool(url="postgresql://localhost/quests"))
+
+
+async def main():
+    assembly = PoolAssembly()
+    await assembly.pool().connect()
+    ...
+    await assembly.close()  # or await assembly.aclose(), or async with
+```
+
+Await what `close()` returns: left unawaited, it closes nothing, and Python warns that a coroutine was never awaited.
+mypy and pyright flag an unawaited `close()` on a variable of the subclass's type, but not on one typed
+`PilgrimAssembly`, whose `close()` returns `None`: there, call `await aclose()`, which is async on every assembly.
+`with` raises `AsyncTeardownRequired` on entering, before its body runs, since leaving it can't wait for the
+teardown. A plain `PilgrimAssembly`'s `close()` is unchanged: it closes in sync and returns `None`.
+
+| shut down with | `PilgrimAssembly`, sync teardowns | `PilgrimAssembly`, an async teardown | `AsyncPilgrimAssembly` |
+|---|---|---|---|
+| `await aclose()`, `async with` | closes | closes | closes |
+| `close()`, `with` | closes | `AsyncTeardownRequired` | `close()` returns a coroutine to await; `with` refuses |
+| `await close()`, `asyncio.run(close())` | closes, then `await` raises `TypeError`, and `asyncio.run()` `ValueError` (`TypeError` from Python 3.14), as `close()` returns `None` | `AsyncTeardownRequired` | closes |
+| an owner's or holder's `close()` | closes | `AsyncTeardownRequired` | closes if nothing async in it was made and it doesn't override `aclose()`, or else `AsyncTeardownRequired` |
+| an owner's or holder's `await aclose()` | closes | closes | closes |
 
 ### Nested assemblies
 
@@ -203,8 +239,20 @@ async def lifespan(app: FastAPI):
     await AssemblyHolder.aclose()
 ```
 
-An assembly that's a component of another, made with `self.shared(lambda: MapAssembly())`, is closed like any other
-component.
+An assembly that's a component of another, made with `self.shared(MapAssembly)`, is closed with the rest of its
+components.
+
+An assembly that another closes, as a component or as one it owns, or that `AssemblyHolder` closes, is closed through
+its own lifecycle, not its `close()`: `await aclose()` awaits its `aclose()`, and a sync `close()` closes it as
+`PilgrimAssembly.close()` does. So an `AsyncPilgrimAssembly`, or one that overrides `close()` as `async def`, is
+closed in sync when nothing async in it has been made; if something has, or an `AsyncPilgrimAssembly` overrides
+`aclose()`, the sync `close()` raises `AsyncTeardownRequired` before closing anything. A `destroy=` given for the
+component is used instead, as for any other.
+
+So an override of an assembly's `close()` runs only when that assembly is closed itself, not when another closes it,
+and an override of its `aclose()` runs when it, its owner or its holder is closed with `await aclose()`. Before 0.4.0,
+a sync close called a held or owned assembly's own `close()`. To flush or log whenever an assembly closes, however it
+is closed, make that a `shared` component of it with a `close()` or a `destroy=`.
 
 ## Injecting into top-level classes
 

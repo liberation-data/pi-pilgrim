@@ -62,10 +62,10 @@ class AssemblyHolder:
     @classmethod
     def close(cls) -> None:
         """
-        Closes every held assembly, newest first, with its `close()`, and forgets it. One that another held assembly
-        owns is closed by its owner, after the owner's components. If any of them has a teardown that is async,
-        refuses before closing anything, and says to use `await aclose()`. Errors are raised together, as an
-        ExceptionGroup, once every assembly has been closed.
+        Closes every held assembly, newest first, as `PilgrimAssembly.close()` does, and forgets it. One that another
+        held assembly owns is closed by its owner, after the owner's components. If any of them has a teardown that is
+        async, raises `AsyncTeardownRequired` before closing anything, and says to use `await aclose()`. Errors are
+        raised together, as an ExceptionGroup, once every assembly has been closed.
         """
         held = cls._held()
         seen: Set[int] = set()
@@ -73,7 +73,8 @@ class AssemblyHolder:
         errors: List[Exception] = []
         for assembly in held:
             try:
-                assembly.close()
+                # Not its close(), which an AsyncPilgrimAssembly's is async, though nothing async in it was made.
+                assembly._close_sync()
             except Exception as e:
                 errors.append(e)
         cls._raise_errors(errors)
