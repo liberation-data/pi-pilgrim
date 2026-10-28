@@ -71,11 +71,15 @@ def main(argv: list[str]) -> int:
     wheel = Path(argv[0]).resolve()
     with tempfile.TemporaryDirectory(prefix="pi-pilgrim-smoke-") as root:
         home = Path(root)
-        venv.create(home / "venv", with_pip=True)
+        # Linked to the interpreter, as `python -m venv` makes it, not copied: a copy of uv's relocatable Python can't
+        # find its libpython, beside the original, and dies.
+        venv.create(home / "venv", with_pip=True, symlinks=sys.platform != "win32")
         python = home / "venv" / ("Scripts" if sys.platform == "win32" else "bin") / "python"
         subprocess.run([python, "-m", "pip", "install", "--quiet", "--no-input", "--disable-pip-version-check", str(wheel)], check=True)
-        # Run from the empty directory, so that a checkout's pipilgrim can't be imported in the wheel's place.
-        subprocess.run([python, "-c", CHECK], check=True, cwd=home)
+        # Run from the empty directory, isolated (-I), so that a checkout's pipilgrim can't be imported in the wheel's
+        # place: -I leaves out the current directory and the user's site-packages, and ignores PYTHON* variables, so
+        # neither PYTHONPATH nor PYTHONOPTIMIZE, which would skip the asserts, lets a broken wheel pass.
+        subprocess.run([python, "-I", "-c", CHECK], check=True, cwd=home)
     print(f"{wheel.name}: installs, imports, and makes and closes an assembly")
     return 0
 
