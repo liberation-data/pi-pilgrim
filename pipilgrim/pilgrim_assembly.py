@@ -7,7 +7,7 @@ import weakref
 from enum import Enum
 from typing import Any, Callable, Dict, Hashable, List, Literal, Optional, Self, Set, Tuple, TypeVar, Union
 
-from pipilgrim.errors import PilgrimError
+from pipilgrim.errors import AsyncTeardownRequired, PilgrimError
 
 T = TypeVar("T")
 
@@ -50,7 +50,8 @@ class PilgrimAssembly:
     Resolving is thread-safe: one thread builds an object graph at a time, and a shared component is made once.
 
     Closing the assembly, with `close()`, `await aclose()`, `with` or `async with`, tears down its `shared` and live
-    `weak_shared` components, newest first.
+    `weak_shared` components, newest first. An assembly whose teardown is async can subclass `AsyncPilgrimAssembly`,
+    whose `close()` is `aclose()`.
     """
 
     class Lifecycle(Enum):
@@ -172,12 +173,21 @@ class PilgrimAssembly:
         """
         Tears down the assembly's `shared` components, and its `weak_shared` ones that are still alive, newest first,
         then closes the assemblies it owns. A component's teardown is its `destroy=` hook, or else its `close()` or
-        `shutdown()`, whichever it has first.
+        `shutdown()`, whichever it has first. A component that is itself an assembly is closed as this one is.
 
-        If any teardown is async, `close()` refuses, before closing anything, and says to use `await aclose()`.
+        If any teardown is async, `close()` raises `AsyncTeardownRequired`, before closing anything, and says to use
+        `await aclose()`. An `AsyncPilgrimAssembly`'s `close()` is `aclose()`, to await.
 
         Closing twice does nothing. A failed teardown doesn't stop the others: their errors are raised together, as an
         ExceptionGroup, once every component has been closed. A closed assembly makes no more components.
+        """
+        self._close_sync()
+
+    def _close_sync(self) -> None:
+        """
+        What `close()` does. An assembly that closes another synchronously, as a component, as one it owns, or from
+        `AssemblyHolder.close()`, calls this, not the other's `close()`, which an `AsyncPilgrimAssembly`, or a subclass
+        that overrides it, may make async.
         """
         closing = self._begin_close(sync=True)
         if closing is None:
@@ -186,11 +196,11 @@ class PilgrimAssembly:
         errors: List[Exception] = []
         for key, instance, destroy in components:
             try:
-                result = _teardown(instance, destroy, _SYNC_TEARDOWNS)
+                result = _teardown(instance, destroy, sync=True)
                 if inspect.isawaitable(result):
                     if inspect.iscoroutine(result):
                         result.close()
-                    raise PilgrimError(
+                    raise AsyncTeardownRequired(
                         f"The teardown of {_describe(key)} returned an awaitable, which close() can't wait for. "
                         f"Close {type(self).__name__} with await aclose()."
                     )
@@ -198,7 +208,7 @@ class PilgrimAssembly:
                 errors.append(_closing(e, key))
         for it in owned:
             try:
-                it.close()
+                it._close_sync()
             except Exception as e:
                 errors.append(e)
         self._raise_errors(errors)
@@ -208,7 +218,7 @@ class PilgrimAssembly:
         Tears down the assembly's `shared` components, and its `weak_shared` ones that are still alive, newest first,
         then closes the assemblies it owns. A component's teardown is its `destroy=` hook, or else its `aclose()`,
         `close()` or `shutdown()`, whichever it has first. A teardown that returns an awaitable is awaited, so it may
-        be sync or async.
+        be sync or async. A component that is itself an assembly, and an owned one, is closed with its `aclose()`.
 
         Closing twice does nothing: a second call returns at once, even while the first is still closing. A failed
         teardown doesn't stop the others: their errors are raised together, as an ExceptionGroup, once every component
@@ -221,7 +231,7 @@ class PilgrimAssembly:
         errors: List[Exception] = []
         for key, instance, destroy in components:
             try:
-                result = _teardown(instance, destroy, _ASYNC_TEARDOWNS)
+                result = _teardown(instance, destroy, sync=False)
                 if inspect.isawaitable(result):
                     await result
             except Exception as e:
@@ -296,11 +306,13 @@ class PilgrimAssembly:
                     if inspect.iscoroutinefunction(destroy):
                         found.append(_describe(key))
                     continue
+                # An assembly is closed as this one is, whatever its close() is, so what counts is what it holds.
+                if isinstance(instance, PilgrimAssembly):
+                    found += instance._async_teardowns(seen)
+                    continue
                 hook = _first_teardown(instance, _SYNC_TEARDOWNS)
                 if hook is None or inspect.iscoroutinefunction(hook):
                     found.append(_describe(key))
-                elif isinstance(instance, PilgrimAssembly):
-                    found += instance._async_teardowns(seen)
             for it in self._owned:
                 found += it._async_teardowns(seen)
         return found
@@ -505,6 +517,38 @@ class PilgrimAssembly:
             self._prune_at = max(_PRUNE_FLOOR, 2 * len(self._closeables))
 
 
+class AsyncPilgrimAssembly(PilgrimAssembly):
+    """
+    An assembly whose teardown is async, such as one that holds a database driver's pool: its `close()` is
+    `aclose()`, so `await assembly.close()` and `asyncio.run(assembly.close())` close it, whether or not anything
+    async has been made yet. Close it with `await aclose()`, `await close()` or `async with`.
+
+    `with` refuses, on entering, since leaving it can't wait for the teardown. An assembly that holds or owns this one
+    closes it as it closes any other: with `aclose()`, or with a sync close when nothing async in it has been made,
+    and otherwise refuses with `AsyncTeardownRequired` before closing anything.
+    """
+
+    async def close(self) -> None:  # type: ignore[override]  # pyright: ignore[reportIncompatibleMethodOverride]
+        """
+        Closes the assembly, as `aclose()` does. Await it: left unawaited, it closes nothing, and Python warns that it
+        was never awaited.
+        """
+        await self.aclose()
+
+    def __enter__(self) -> Self:
+        raise AsyncTeardownRequired(
+            f"{type(self).__name__} can't be used with `with`, since its teardown is async. Use async with, or "
+            f"close it with await aclose()."
+        )
+
+    def __exit__(self, *exc_info: object) -> None:
+        """
+        Reached without `__enter__`, as from `ExitStack.push`: closes in sync, or refuses with `AsyncTeardownRequired`
+        if something async in it was made, rather than leave a coroutine from `close()` unawaited.
+        """
+        self._close_sync()
+
+
 _SHARED = PilgrimAssembly.Lifecycle.SHARED
 _WEAK_SHARED = PilgrimAssembly.Lifecycle.WEAK_SHARED
 _OBJECT_GRAPH = PilgrimAssembly.Lifecycle.OBJECT_GRAPH
@@ -565,13 +609,20 @@ def _first_teardown(instance: Any, names: Tuple[str, ...]) -> Optional[Callable[
     return None
 
 
-def _teardown(instance: Any, destroy: Any, names: Tuple[str, ...]) -> object:
+def _teardown(instance: Any, destroy: Any, sync: bool) -> object:
     """
-    Runs a component's teardown, returning what it returns, which may be an awaitable.
+    Runs a component's teardown, returning what it returns, which may be an awaitable. A component that is an
+    assembly is closed through its own lifecycle: `aclose()`, or, from a sync close, what `close()` does, whatever
+    its own `close()` is.
     """
     if destroy is not _INFER:
         return destroy(instance)
-    hook = _first_teardown(instance, names)
+    if isinstance(instance, PilgrimAssembly):
+        if sync:
+            instance._close_sync()
+            return None
+        return instance.aclose()
+    hook = _first_teardown(instance, _SYNC_TEARDOWNS if sync else _ASYNC_TEARDOWNS)
     return None if hook is None else hook()
 
 
@@ -582,7 +633,7 @@ def _closing(error: Exception, key: _Key) -> Exception:
 
 def _refuse_async(name: str, components: List[str]) -> None:
     if components:
-        raise PilgrimError(
+        raise AsyncTeardownRequired(
             f"{name} can't be closed with close(), since the teardown of {', '.join(components)} is async. Close it "
             f"with await aclose()."
         )
