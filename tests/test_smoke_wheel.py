@@ -23,10 +23,11 @@ smoke_wheel = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(smoke_wheel)
 
 
-def _wheel_without_pipilgrim(directory: Path) -> Path:
-    # A wheel pip installs, but that has no pipilgrim in it: the package left out of the build.
+def _wheel(directory: Path, package: dict[str, str]) -> Path:
+    # A wheel pip installs, with the files given for its package: none, when the package is left out of the build.
     name, dist_info = "pi_pilgrim-0.0.0-py3-none-any.whl", "pi_pilgrim-0.0.0.dist-info"
     files = {
+        **package,
         f"{dist_info}/METADATA": "Metadata-Version: 2.1\nName: pi-pilgrim\nVersion: 0.0.0\n",
         f"{dist_info}/WHEEL": "Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
     }
@@ -42,6 +43,26 @@ def _wheel_without_pipilgrim(directory: Path) -> Path:
     return wheel
 
 
+# A pipilgrim that imports, but whose assembly doesn't close its shared components when it is closed.
+_PILGRIM_THAT_DOESNT_CLOSE = """\
+class PilgrimAssembly:
+    def __init__(self):
+        self._shared = {}
+
+    def shared(self, factory):
+        return self._shared.setdefault(factory.__code__, factory())
+
+    def unshared(self, factory):
+        return factory()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        pass
+"""
+
+
 class TestSmokeWheel(unittest.TestCase):
     def test_refuses_anything_but_one_wheel_with_exit_status_2(self):
         for args in [[], ["dist/pi_pilgrim-0.3.0.tar.gz"], ["a.whl", "b.whl"]]:
@@ -53,11 +74,20 @@ class TestSmokeWheel(unittest.TestCase):
         # With the checkout on PYTHONPATH, and PYTHONOPTIMIZE skipping asserts, the checkout's pipilgrim would pass
         # for the wheel's if the check weren't isolated from them.
         with tempfile.TemporaryDirectory() as root:
-            wheel = _wheel_without_pipilgrim(Path(root))
+            wheel = _wheel(Path(root), {})
             env = {**os.environ, "PYTHONPATH": str(_root), "PYTHONOPTIMIZE": "1", "TMPDIR": root}
             run = subprocess.run([sys.executable, str(_script), str(wheel)], env=env, capture_output=True, text=True)
             self.assertNotEqual(run.returncode, 0, run.stdout)
             self.assertIn("No module named 'pipilgrim'", run.stderr)
+
+    def test_fails_a_wheel_whose_assembly_doesnt_close_even_with_pythonoptimize(self):
+        # The check's asserts are what fail this wheel, so PYTHONOPTIMIZE, which would skip them, mustn't reach it.
+        with tempfile.TemporaryDirectory() as root:
+            wheel = _wheel(Path(root), {"pipilgrim/__init__.py": _PILGRIM_THAT_DOESNT_CLOSE})
+            env = {**os.environ, "PYTHONOPTIMIZE": "1", "TMPDIR": root}
+            run = subprocess.run([sys.executable, str(_script), str(wheel)], env=env, capture_output=True, text=True)
+            self.assertNotEqual(run.returncode, 0, run.stdout)
+            self.assertIn("closing the assembly didn't close its shared Map", run.stderr)
 
 
 if __name__ == "__main__":
