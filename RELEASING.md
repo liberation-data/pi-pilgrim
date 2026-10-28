@@ -69,7 +69,9 @@ A dry run of a version PyPI already has only warns.
   For a release candidate of a minor or major version, give the exact `version`, for example `0.4.0-rc.1`.
 - **Prereleases:** write the version in `pyproject.toml` as the tag has it, with a `-`: `0.4.0-rc.1`, tagged
   `v0.4.0-rc.1`. PEP 440 normalizes it, so the distributions and PyPI call it `0.4.0rc1`, and pip installs it only
-  when asked (`pip install pi-pilgrim==0.4.0rc1`, or `--pre`).
+  when asked (`pip install pi-pilgrim==0.4.0rc1`, or `--pre`). `0.4.0rc1` in `pyproject.toml` can't be tagged: `check`
+  wants a `-` in the tag. The suffix must be one PEP 440 reads (`a`, `b`, `rc`, `alpha`, `beta`, `c`, `pre`, `dev`,
+  with a number), or the build fails before anything is published.
 
 The same checks, locally, publishing nothing:
 
