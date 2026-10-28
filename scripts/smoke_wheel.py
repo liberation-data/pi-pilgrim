@@ -75,7 +75,8 @@ def main(argv: list[str]) -> int:
         # find its libpython, beside the original, and dies.
         venv.create(home / "venv", with_pip=True, symlinks=sys.platform != "win32")
         python = home / "venv" / ("Scripts" if sys.platform == "win32" else "bin") / "python"
-        subprocess.run([python, "-m", "pip", "install", "--quiet", "--no-input", "--disable-pip-version-check", str(wheel)], check=True)
+        pip = [python, "-m", "pip", "install", "--quiet", "--no-input", "--disable-pip-version-check"]
+        subprocess.run([*pip, str(wheel)], check=True)
         # Run from the empty directory, isolated (-I), so that a checkout's pipilgrim can't be imported in the wheel's
         # place: -I leaves out the current directory and the user's site-packages, and ignores PYTHON* variables, so
         # neither PYTHONPATH nor PYTHONOPTIMIZE, which would skip the asserts, lets a broken wheel pass.
