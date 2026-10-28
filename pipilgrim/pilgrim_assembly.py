@@ -290,7 +290,8 @@ class PilgrimAssembly:
     def _async_teardowns(self, seen: Optional[Set[int]] = None) -> List[str]:
         """
         The components, here or in the assemblies this one owns or holds, whose teardown close() can't run because
-        it is async. `seen` holds the assemblies already looked at, so two that hold each other are looked at once.
+        it is async, and any `AsyncPilgrimAssembly` among them that overrides `aclose()`. `seen` holds the assemblies
+        already looked at, so two that hold each other are looked at once.
         """
         found: List[str] = []
         seen = set() if seen is None else seen
@@ -298,6 +299,9 @@ class PilgrimAssembly:
             if self._closed or id(self) in seen:
                 return found
             seen.add(id(self))
+            # A sync close skips an AsyncPilgrimAssembly's own aclose(), so one that overrides it can't close in sync.
+            if isinstance(self, AsyncPilgrimAssembly) and type(self).aclose is not PilgrimAssembly.aclose:
+                found.append(f"{type(self).__name__}.aclose()")
             for key, held, weak, destroy in self._closeables:
                 instance = held() if weak else held
                 if instance is None:
@@ -525,7 +529,8 @@ class AsyncPilgrimAssembly(PilgrimAssembly):
 
     `with` refuses, on entering, since leaving it can't wait for the teardown. An assembly that holds or owns this one
     closes it as it closes any other: with `aclose()`, or with a sync close when nothing async in it has been made,
-    and otherwise refuses with `AsyncTeardownRequired` before closing anything.
+    and otherwise refuses with `AsyncTeardownRequired` before closing anything. A sync close can't run an overridden
+    `aclose()`, so it refuses for a subclass that overrides one, whatever has been made.
     """
 
     async def close(self) -> None:  # type: ignore[override]  # pyright: ignore[reportIncompatibleMethodOverride]
@@ -544,7 +549,8 @@ class AsyncPilgrimAssembly(PilgrimAssembly):
     def __exit__(self, *exc_info: object) -> None:
         """
         Reached without `__enter__`, as from `ExitStack.push`: closes in sync, or refuses with `AsyncTeardownRequired`
-        if something async in it was made, rather than leave a coroutine from `close()` unawaited.
+        if something async in it was made or it overrides `aclose()`, rather than leave a coroutine from `close()`
+        unawaited.
         """
         self._close_sync()
 

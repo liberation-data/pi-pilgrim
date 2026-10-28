@@ -207,6 +207,8 @@ async def main():
 ```
 
 Await what `close()` returns: left unawaited, it closes nothing, and Python warns that a coroutine was never awaited.
+mypy and pyright flag an unawaited `close()` on a variable of the subclass's type, but not on one typed
+`PilgrimAssembly`, whose `close()` returns `None`: there, call `await aclose()`, which is async on every assembly.
 `with` raises `AsyncTeardownRequired` on entering, before its body runs, since leaving it can't wait for the
 teardown. A plain `PilgrimAssembly`'s `close()` is unchanged: it closes in sync and returns `None`.
 
@@ -215,7 +217,7 @@ teardown. A plain `PilgrimAssembly`'s `close()` is unchanged: it closes in sync 
 | `await aclose()`, `async with` | closes | closes | closes |
 | `close()`, `with` | closes | `AsyncTeardownRequired` | `close()` returns a coroutine to await; `with` refuses |
 | `await close()`, `asyncio.run(close())` | closes, then `await` raises `TypeError`, and `asyncio.run()` `ValueError` (`TypeError` from Python 3.14), as `close()` returns `None` | `AsyncTeardownRequired` | closes |
-| an owner's or holder's `close()` | closes | `AsyncTeardownRequired` | closes if nothing async in it was made, or else `AsyncTeardownRequired` |
+| an owner's or holder's `close()` | closes | `AsyncTeardownRequired` | closes if nothing async in it was made and it doesn't override `aclose()`, or else `AsyncTeardownRequired` |
 | an owner's or holder's `await aclose()` | closes | closes | closes |
 
 ### Nested assemblies
@@ -243,9 +245,14 @@ components.
 An assembly that another closes, as a component or as one it owns, or that `AssemblyHolder` closes, is closed through
 its own lifecycle, not its `close()`: `await aclose()` awaits its `aclose()`, and a sync `close()` closes it as
 `PilgrimAssembly.close()` does. So an `AsyncPilgrimAssembly`, or one that overrides `close()` as `async def`, is
-closed in sync when nothing async in it has been made; if something has, the sync `close()` raises
-`AsyncTeardownRequired` before closing anything. A `destroy=` given for the component is used instead, as for any
-other.
+closed in sync when nothing async in it has been made; if something has, or an `AsyncPilgrimAssembly` overrides
+`aclose()`, the sync `close()` raises `AsyncTeardownRequired` before closing anything. A `destroy=` given for the
+component is used instead, as for any other.
+
+So an override of an assembly's `close()` runs only when that assembly is closed itself, not when another closes it,
+and an override of its `aclose()` runs when it, its owner or its holder is closed with `await aclose()`. Before 0.4.0,
+a sync close called a held or owned assembly's own `close()`. To flush or log whenever an assembly closes, however it
+is closed, make that a `shared` component of it with a `close()` or a `destroy=`.
 
 ## Injecting into top-level classes
 

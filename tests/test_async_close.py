@@ -266,6 +266,80 @@ class TestAsyncPilgrimAssembly(unittest.TestCase):
     def test_is_a_pilgrim_assembly(self):
         self.assertIsInstance(AsyncDatabase(), PilgrimAssembly)
 
+    def test_a_subclass_of_a_subclass_that_overrides_aclose_still_closes_its_components_newest_first(self):
+        expected = ["ClosingDatabase.aclose", "Driver.aclose", "cache", "repository", "pool"]
+        for name, shut_down in (("await close()", await_close), ("holder's await aclose()", outer_aclose)):
+            with self.subTest(name):
+                holder, assembly = held_with_shared(ClosingDatabase)
+                assembly.make()
+                assembly.cache()
+                shut_down(assembly, holder)
+                self.assertEqual(assembly.log, expected)
+
+    def test_a_sync_close_refuses_an_overridden_aclose_even_with_nothing_async_made(self):
+        for name, hold, shut_down in (
+            ("self.shared, close()", SHARED, outer_close),
+            ("AssemblyHolder.shared, owner's close()", OWNED, outer_close),
+            ("AssemblyHolder.close()", HELD_APP, holder_close),
+            ("__exit__ without __enter__", ALONE, lambda assembly, outer: assembly.__exit__(None, None, None)),
+        ):
+            with self.subTest(name):
+                AssemblyHolder.reset()
+                outer, assembly = (None, ClosingDatabase()) if hold is None else hold(ClosingDatabase)
+                assembly.repository()
+                with self.assertRaisesRegex(AsyncTeardownRequired, r"ClosingDatabase\.aclose\(\) is async"):
+                    shut_down(assembly, outer)
+                self.assertEqual(assembly.log, [])
+                self.assertFalse(assembly._closed)
+                asyncio.run((outer or assembly).aclose())
+                self.assertEqual(assembly.log, ["ClosingDatabase.aclose", "Driver.aclose", "repository"])
+        AssemblyHolder.reset()
+
+    def test_a_sync_close_refuses_an_aclose_override_inherited_from_a_mixin(self):
+        class Flushing:
+            async def aclose(self):
+                self.log.append("Flushing.aclose")
+                await super().aclose()
+
+        class Flushed(Flushing, AsyncDatabase):
+            pass
+
+        class NotOverridden(AsyncDatabase, Flushing):
+            pass
+
+        holder, assembly = held_with_shared(Flushed)
+        assembly.repository()
+        with self.assertRaisesRegex(AsyncTeardownRequired, r"Flushed\.aclose\(\) is async"):
+            holder.close()
+        self.assertEqual(assembly.log, [])
+        asyncio.run(holder.aclose())
+        self.assertEqual(assembly.log, ["Flushing.aclose", "repository"])
+
+        # PilgrimAssembly.aclose comes first in its MRO, so the mixin's never runs, and a sync close is fine.
+        holder, assembly = held_with_shared(NotOverridden)
+        assembly.repository()
+        holder.close()
+        self.assertEqual(assembly.log, ["repository"])
+
+
+class Driver(AsyncDatabase):
+    """
+    An async assembly that overrides aclose(), to close something it doesn't hold as a component.
+    """
+
+    async def aclose(self):
+        self.log.append("Driver.aclose")
+        await super().aclose()
+
+
+class ClosingDatabase(Driver):
+    def cache(self):
+        return self.shared(lambda: Resource(self.log, "cache"))
+
+    async def aclose(self):
+        self.log.append("ClosingDatabase.aclose")
+        await super().aclose()
+
 
 class Inner(PilgrimAssembly):
     """
@@ -367,6 +441,50 @@ class TestAnAssemblyIsClosedThroughItsOwnLifecycle(unittest.TestCase):
         asyncio.run(holder.aclose())
         self.assertEqual(calls, ["aclose"])
         self.assertEqual(assembly.log, ["repository", "pool"])
+
+    def test_a_component_assemblys_failed_teardown_doesnt_stop_the_others(self):
+        class Failing:
+            def __init__(self, log):
+                self.log = log
+
+            def close(self):
+                self.log.append("failing")
+                raise RuntimeError("failed")
+
+        for kind in (SyncDatabase, AsyncDatabase):
+            for name, close in (("close", lambda it: it.close()), ("aclose", lambda it: asyncio.run(it.aclose()))):
+                with self.subTest(kind.__name__, close=name):
+                    log = []
+
+                    class Database(kind):
+                        def failing(self):
+                            return self.shared(lambda: Failing(self.log))
+
+                    class Holder(PilgrimAssembly):
+                        def before(self):
+                            return self.shared(lambda: Resource(log, "before"))
+
+                        def database(self):
+                            return self.shared(Database)
+
+                        def after(self):
+                            return self.shared(lambda: Resource(log, "after"))
+
+                    holder = Holder()
+                    holder.before()
+                    database = holder.database()
+                    database.failing()
+                    database.repository()
+                    holder.after()
+                    with self.assertRaises(ExceptionGroup) as caught:
+                        close(holder)
+                    self.assertEqual(log, ["after", "before"])
+                    self.assertEqual(database.log, ["repository", "failing"])
+                    (group,) = caught.exception.exceptions
+                    self.assertIsInstance(group, ExceptionGroup)
+                    self.assertEqual(len(group.__notes__), 1)
+                    self.assertIn("database", group.__notes__[0])
+                    self.assertEqual(str(group.exceptions[0]), "failed")
 
     def test_a_component_assemblys_destroy_hook_is_still_used(self):
         log = []
