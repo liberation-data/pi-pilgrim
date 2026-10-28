@@ -4,10 +4,12 @@ which `sort -V` gets the wrong way round.
 """
 
 import importlib.util
+import io
 import tempfile
 import tomllib
 import unittest
 from pathlib import Path
+from unittest import mock
 
 _root = Path(__file__).parents[1]
 _spec = importlib.util.spec_from_file_location("release_version", _root / "scripts" / "release_version.py")
@@ -63,6 +65,21 @@ class TestReleaseVersion(unittest.TestCase):
         for text in ["0.3", "0.3.0rc1"]:
             with self.subTest(text=text), self.assertRaises(ValueError):
                 release_version.Version(text)
+
+    def test_newest_reads_the_tags_from_stdin(self):
+        # The workflows pipe `git tag -l 'v*'` in, one tag a line, and print nothing when no tag is a version.
+        for tags, expected in [("v0.2.0\nv0.3.0-rc.1\nv0.3.0\n", "v0.3.0\n"), ("vnext\n", ""), ("", "")]:
+            with self.subTest(tags=tags), mock.patch("sys.stdin", io.StringIO(tags)):
+                with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+                    self.assertEqual(release_version.main(["newest"]), 0)
+                self.assertEqual(out.getvalue(), expected)
+
+    def test_refuses_a_bad_bump_or_version_with_exit_status_2(self):
+        # prepare-release's workflow_call takes bump as any string, so a kind that isn't one fails the step, saying why.
+        for args in [["bump", "0.3.0", "huge"], ["bump", "0.3", "patch"], ["greater", "0.3.0rc1", "0.3.0"], ["set"]]:
+            with self.subTest(args=args), mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+                self.assertEqual(release_version.main(args), 2)
+                self.assertNotEqual(err.getvalue(), "")
 
     def test_set_rewrites_the_project_version(self):
         with tempfile.TemporaryDirectory() as root:
